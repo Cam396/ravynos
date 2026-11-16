@@ -5,6 +5,8 @@ KERNEL_PRIVATE = yes
 INFO_PLIST = Info-msdosfs_kext.plist
 BUNDLE_IDENTIFIER = com.apple.filesystems.msdosfs
 BUNDLE_VERSION = 1.10.0
+MAIN_FUNCTION = msdosfs_module_start
+ANTIMAIN_FUNCTION = msdosfs_module_stop
 
 .PATH: ${.CURDIR}/msdosfs.kextproj/msdosfs.kmodproj
 SRCS = 	msdosfs_conv.c \

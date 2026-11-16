@@ -272,6 +272,14 @@ extern const CFRuntimeClass __OSKextClass;
 
 /* kext.c */
 extern OSKextRef gPEKext;
+extern Boolean gMontereySandboxV80;
+extern unsigned gMontereySandboxV80Links;
+extern Boolean gMontereyEndpointSecurityV80;
+extern unsigned gMontereyEndpointSecurityV80Links;
+extern Boolean gMontereyAMFIV80;
+extern unsigned gMontereyAMFIV80Links;
+extern Boolean gMontereyImage4V80;
+extern unsigned gMontereyImage4V80Links;
 
 CFTypeID
 OSKextGetTypeID(void);

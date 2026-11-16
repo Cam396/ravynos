@@ -19,6 +19,11 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <IOKit/system.h>
 
@@ -374,15 +379,27 @@ IOPCIPlatformInitialize(void)
         forceintcpu = 0;
     }
 
+    int ravynMsi = 0;
+    PE_parse_boot_argn("ravyn_pci_msi", &ravynMsi, sizeof(ravynMsi));
+    // The platform callback supports the BSP's 8-bit xAPIC vector space.
+    // Do not allocate the old two-CPU encoded-vector space for that path.
+    uint32_t vectorCount = ravynMsi ? (0x100 - kBaseMessagedInterruptVectors)
+                                    : kNumMessagedInterruptVectors;
 	ic = new IOPCIMessagedInterruptController;
-	if (ic && !ic->init(kNumMessagedInterruptVectors, kBaseMessagedInterruptVectors))
+	if (ic && !ic->init(vectorCount, kBaseMessagedInterruptVectors))
 	{
 		ic->release();
 		ic = 0;
 	}
 	if (ic)
 	{
-        if (forceintcpu && lapic_max_interrupt_cpunum)
+        if (ravynMsi)
+        {
+            ok  = ic->reserveVectors(0x7F - kBaseMessagedInterruptVectors, 4);
+            ok &= ic->reserveVectors(0xD0 - kBaseMessagedInterruptVectors, 16);
+            ok &= ic->reserveVectors(0xFF - kBaseMessagedInterruptVectors, 1);
+        }
+        else if (forceintcpu && lapic_max_interrupt_cpunum)
         {
             // no vectors below 0x100
             ok  = ic->reserveVectors(0, 0x100 - kBaseMessagedInterruptVectors);
@@ -394,7 +411,7 @@ IOPCIPlatformInitialize(void)
             ok &= ic->reserveVectors(0xD0 - kBaseMessagedInterruptVectors, 16);
             ok &= ic->reserveVectors(0xFF - kBaseMessagedInterruptVectors, 1);
         }
-        if (lapic_max_interrupt_cpunum)
+        if (!ravynMsi && lapic_max_interrupt_cpunum)
         {
             // used by osfmk/cpu
             ok &= ic->reserveVectors(0x100 - kBaseMessagedInterruptVectors, 32);
@@ -402,7 +419,7 @@ IOPCIPlatformInitialize(void)
             ok &= ic->reserveVectors(0x1D0 - kBaseMessagedInterruptVectors, 16);
             ok &= ic->reserveVectors(0x1FF - kBaseMessagedInterruptVectors, 1);
         }
-        else
+        else if (!ravynMsi)
         {
             // no vectors above 0xFF
             ok  = ic->reserveVectors(0x100 - kBaseMessagedInterruptVectors, 0x100);
@@ -496,7 +513,9 @@ IOReturn IOPCIBridge::configOp(IOService * device, uintptr_t op, void * result, 
             panic("!IOPCIConfigurator");
 
 #if ACPI_SUPPORT
-	    if (version_major < 17) IOPCIPlatformInitialize();
+        int ravynMsi = 0;
+        PE_parse_boot_argn("ravyn_pci_msi", &ravynMsi, sizeof(ravynMsi));
+        if (version_major < 17 || ravynMsi) IOPCIPlatformInitialize();
 	    AppleVTD::installInterrupts();
 #endif /* ACPI_SUPPORT */
 
@@ -2769,6 +2788,12 @@ IOReturn IOPCIBridge::getNubResources( IOService * service )
     service->setProperty(kIOPCIResourcedKey, kOSBooleanTrue);
 
     err = getDTNubAddressing( nub );
+    int firmwareResources = 0;
+    PE_parse_boot_argn("ravyn_pci_firmware_resources", &firmwareResources,
+                       sizeof(firmwareResources));
+    if (firmwareResources)
+        kprintf("RAVYN-PCI-INT %s config=0x%x addressing=0x%x\n", nub->getName(),
+                nub->configRead32(kIOPCIConfigInterruptLine), err);
 
     bool 
     msiDefault = (false

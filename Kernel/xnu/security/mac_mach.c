@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <mach/exception_types.h>
 #include <mach/mach_types.h>
@@ -37,6 +42,7 @@
 #include <sys/proc_internal.h>
 #include <sys/kauth.h>
 #include <kern/task.h>
+#include <kern/telemetry.h>
 
 #include <security/mac_framework.h>
 #include <security/mac_internal.h>
@@ -85,7 +91,7 @@ mac_task_check_expose_task(struct task *task)
 	}
 
 	struct ucred *cred = kauth_cred_get();
-	MAC_CHECK(proc_check_expose_task, cred, p);
+	error = mac_proc_check_expose_task(cred, p);
 	proc_rele(p);
 	return error;
 }
@@ -146,6 +152,27 @@ mac_task_check_set_host_exception_ports(struct task *task, unsigned int exceptio
 	}
 	kauth_cred_unref(&cred);
 	proc_rele(p);
+	return error;
+}
+
+
+int
+mac_task_check_get_movable_control_port(void)
+{
+    int error;
+    kauth_cred_t cred = kauth_cred_proc_ref(current_proc());
+    MAC_CHECK_V80(proc_check_get_movable_control_port, (cred));
+    kauth_cred_unref(&cred);
+    return error;
+}
+
+int
+mac_task_check_dyld_process_info_notify_register(void)
+{
+	int error;
+	kauth_cred_t cred = kauth_cred_proc_ref(current_proc());
+	MAC_CHECK_V80(proc_check_dyld_process_info_notify_register, (cred));
+	kauth_cred_unref(&cred);
 	return error;
 }
 
@@ -302,4 +329,21 @@ mac_exc_action_check_exception_send(struct task *victim_task, struct exception_a
 	}
 
 	return error;
+}
+
+/* Explicit modern MAC telemetry, preserving the legacy user-return hooks. */
+int
+mac_schedule_telemetry(void)
+{
+#if CONFIG_TELEMETRY
+    return telemetry_macf_mark_curthread();
+#else
+    return ENOTSUP;
+#endif
+}
+
+void
+mac_thread_telemetry(struct thread *thread, int error, const void *data, size_t length)
+{
+    MAC_PERFORM_V80(thread_telemetry, (thread, error, data, length));
 }

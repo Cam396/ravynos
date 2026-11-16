@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /* 
@@ -143,12 +148,28 @@ type task_inspect_t = mach_port_t
 #endif	/* KERNEL_SERVER */
 		;
 
+type task_read_t = mach_port_t
+#if	KERNEL_SERVER
+		intran: task_read_t convert_port_to_task_read(mach_port_t)
+		outtran: mach_port_t convert_task_read_to_port(task_read_t)
+		destructor: task_read_deallocate(task_read_t)
+#endif	/* KERNEL_SERVER */
+		;
+
 type thread_t = mach_port_t
 #if	KERNEL_SERVER
 		intran: thread_t convert_port_to_thread(mach_port_t)
 		outtran: mach_port_t convert_thread_to_port(thread_t)
 		destructor: thread_deallocate(thread_t)
 #endif	/* KERNEL_SERVER */
+		;
+
+type thread_read_t = mach_port_t
+#if KERNEL_SERVER
+		intran: thread_read_t convert_port_to_thread_read(mach_port_t)
+		outtran: mach_port_t convert_thread_read_to_port(thread_read_t)
+		destructor: thread_read_deallocate(thread_read_t)
+#endif
 		;
 
 type thread_inspect_t = mach_port_t
@@ -174,6 +195,14 @@ type thread_act_consume_ref_t = mach_port_move_send_t
 		destructor: thread_deallocate(thread_act_t)
 #endif	/* KERNEL_SERVER */
 		;
+
+type task_id_token_t = mach_port_t
+#if KERNEL_SERVER
+        intran: task_id_token_t convert_port_to_task_id_token(mach_port_t)
+        outtran: mach_port_t convert_task_id_token_to_port(task_id_token_t)
+        destructor: task_id_token_release(task_id_token_t)
+#endif
+        ;
 
 type suid_cred_path_t = c_string[*:1024];
 type suid_cred_uid_t = uint32_t;
@@ -203,6 +232,14 @@ type vm_map_t = mach_port_t
 		intran: vm_map_t convert_port_to_map(mach_port_t)
 		destructor: vm_map_deallocate(vm_map_t)
 #endif	/* KERNEL_SERVER */
+		;
+
+type vm_map_read_t = mach_port_t
+		cusertype: vm_map_t
+#if KERNEL_SERVER
+		intran: vm_map_t convert_port_to_map_read(mach_port_t)
+		destructor: vm_map_deallocate(vm_map_t)
+#endif
 		;
 
 type vm_task_entry_t = mach_port_t

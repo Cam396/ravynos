@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /*-
  * Copyright (c) 1982, 1986, 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
@@ -455,6 +460,28 @@ sysctl_use_recovery_securityd
 }
 
 /*
+ * Monterey gates kernelmanagerd on this sysctl. Darwin 19 does not use
+ * fileset kernel collections, so require an explicit opt-in for testing.
+ */
+static int
+sysctl_use_kernelmanagerd
+(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	static int use_kernelmanagerd = 0;
+	static int initialized = 0;
+
+	if (!initialized) {
+		int boot_arg = 0;
+		if (PE_parse_boot_argn("kernelmanagerd", &boot_arg, sizeof(boot_arg))) {
+			use_kernelmanagerd = boot_arg != 0;
+		}
+		initialized = 1;
+	}
+
+	return SYSCTL_OUT(req, &use_kernelmanagerd, sizeof(use_kernelmanagerd));
+}
+
+/*
  * hw.* MIB variables.
  */
 SYSCTL_PROC(_hw, HW_NCPU, ncpu, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, HW_NCPU, sysctl_hw_generic, "I", "");
@@ -500,6 +527,7 @@ SYSCTL_INT(_hw, OID_AUTO, packages, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 
 SYSCTL_PROC(_hw, OID_AUTO, osenvironment, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_osenvironment, "A", "");
 SYSCTL_PROC(_hw, OID_AUTO, ephemeral_storage, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_ephemeral_storage, "I", "");
 SYSCTL_PROC(_hw, OID_AUTO, use_recovery_securityd, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_use_recovery_securityd, "I", "");
+SYSCTL_PROC(_hw, OID_AUTO, use_kernelmanagerd, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_use_kernelmanagerd, "I", "");
 
 /*
  * Optional CPU features can register nodes below hw.optional.

@@ -9,12 +9,15 @@ KERNEL_PRIVATE = yes
 SRCS =  ApplePS2Controller.cpp \
         ApplePS2KeyboardDevice.cpp \
         ApplePS2MouseDevice.cpp \
-        ApplePS2Keyboard.cpp
+        ApplePS2Keyboard.cpp \
+        ApplePS2Mouse.cpp \
+        VMwarePointer.cpp
 
 CFLAGS += -I${.CURDIR}/../../xnu/iokit -I${.CURDIR}/../../xnu/osfmk \
 	-I${.CURDIR}/../../xnu/bsd -I${.CURDIR}/../../xnu/libkern \
 	-I${.OBJDIR}/../../xnu/EXPORT_HDRS/osfmk \
         -I${.CURDIR:H}/IOHIDFamily/IOHIDSystem \
+        -I${.CURDIR:H}/IOGraphics/IOGraphicsFamily \
 	-mmacos-version-min=${MACOS_VERSION_MIN} \
 	-Wno-implicit-int-conversion -Wno-sign-conversion -Wno-cast-qual
 CXXFLAGS += -std=c++11 ${CFLAGS}

@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 extern "C" {
 #include <mach/kmod.h>
 #include <libkern/kernel_mach_header.h>
@@ -833,9 +838,30 @@ KLDBootstrap::loadKernelComponentKexts(void)
 
 #define COM_APPLE_KEC  "com.apple.kec."
 
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+extern "C" int ravyn_pthread_component_start(void);
+extern "C" int ravyn_bootstrap_crypto_start(void);
+#if defined(RAVYN_ARM64_STATIC_IOGRAPHICS)
+extern "C" int ravyn_iographics_static_start(void);
+#endif
+#endif
+
 void
 KLDBootstrap::loadKernelExternalComponents(void)
 {
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+    /* This board links the actual pthread KEC into the kernel. Register it
+     * at the normal external-component phase, before BSD initialization. */
+    if (ravyn_bootstrap_crypto_start() != 0)
+        panic("Unable to initialize ARM bootstrap crypto provider");
+    if (ravyn_pthread_component_start() != 0)
+        panic("Unable to initialize static ARM pthread component");
+#if defined(RAVYN_ARM64_STATIC_IOGRAPHICS)
+    if (ravyn_iographics_static_start() != 0)
+        panic("Unable to initialize static ARM GOP graphics component");
+#endif
+#endif
+
 	OSDictionary         * extensionsDict = NULL;// must release
 	OSCollectionIterator * keyIterator    = NULL;// must release
 	OSString             * bundleID       = NULL;// don't release
@@ -922,7 +948,12 @@ KLDBootstrap::readBuiltinPersonalities(void)
 	 * the mach_kernel image.
 	 */
 	infosect   = getsectbyname("__BUILTIN", "__info");
-	if (!infosect) {
+#if defined(__arm64__) && defined(RAVYN_ARM64_STATIC_IOGRAPHICS)
+    /* Keep static personality bytes in an existing mapped ARM64 segment. */
+    if (!infosect || !infosect->size)
+        infosect = getsectbyname("__DATA_CONST", "__builtin_info");
+#endif
+	if (!infosect || !infosect->size) {
 		// this isn't fatal
 		goto finish;
 	}
@@ -977,8 +1008,20 @@ KLDBootstrap::readBuiltinPersonalities(void)
 		    "Adding personalities for built-in driver %s:",
 		    moduleName->getCStringNoCopy());
 
+		/* plktool also embeds prelinked personalities in __BUILTIN.
+		 * Honor the Intel override just as OSKext::copyPersonalitiesArray
+		 * does, otherwise generic and x86_64 matches enter the catalogue
+		 * together and can start a driver before its platform resource.
+		 */
+		personalities = NULL;
+#if defined(__x86_64__)
 		personalities = OSDynamicCast(OSDictionary,
-		    infoDict->getObject("IOKitPersonalities"));
+		    infoDict->getObject("IOKitPersonalities_x86_64"));
+#endif
+		if (!personalities) {
+			personalities = OSDynamicCast(OSDictionary,
+			    infoDict->getObject("IOKitPersonalities"));
+		}
 		if (!personalities) {
 			continue;
 		}

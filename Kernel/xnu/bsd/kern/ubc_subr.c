@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  *	File:	ubc_subr.c
  *	Author:	Umesh Vaishampayan [umeshv@apple.com]
  *		05-Aug-1999	umeshv	Created.
@@ -50,6 +55,7 @@
 #include <sys/buf.h>
 #include <sys/user.h>
 #include <sys/codesign.h>
+#include <libkern/ravyn_amfi.h>
 #include <sys/codedir_internal.h>
 #include <sys/fsevents.h>
 #include <sys/fcntl.h>
@@ -524,6 +530,7 @@ cs_validate_csblob(
 		const CS_SuperBlob *sb;
 		uint32_t n, count;
 		const CS_CodeDirectory *best_cd = NULL;
+		const CS_GenericBlob *der_entitlements = NULL;
 		unsigned int best_rank = 0;
 #if PLATFORM_WatchOS
 		const CS_CodeDirectory *sha1_cd = NULL;
@@ -601,6 +608,12 @@ cs_validate_csblob(
 					return EBADEXEC;
 				}
 				*rentitlements = subBlob;
+			} else if (type == CSSLOT_DER_ENTITLEMENTS) {
+				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_DER_ENTITLEMENTS ||
+				    der_entitlements != NULL) {
+					return EBADEXEC;
+				}
+				der_entitlements = subBlob;
 			}
 		}
 
@@ -747,6 +760,60 @@ csblob_get_entitlements(struct cs_blob *csblob, void **out_start, size_t *out_le
 		entitlements = csblob->csb_entitlements_blob;
 	}
 	embedded_hash = find_special_slot(code_dir, csblob->csb_hashtype->cs_size, CSSLOT_ENTITLEMENTS);
+
+	if (embedded_hash == NULL) {
+		if (entitlements) {
+			return EBADEXEC;
+		}
+		return 0;
+	} else if (entitlements == NULL) {
+		if (memcmp(embedded_hash, cshash_zero, csblob->csb_hashtype->cs_size) != 0) {
+			return EBADEXEC;
+		} else {
+			return 0;
+		}
+	}
+
+	csblob->csb_hashtype->cs_init(&context);
+	csblob->csb_hashtype->cs_update(&context, entitlements, ntohl(entitlements->length));
+	csblob->csb_hashtype->cs_final(computed_hash, &context);
+
+	if (memcmp(computed_hash, embedded_hash, csblob->csb_hashtype->cs_size) != 0) {
+		return EBADEXEC;
+	}
+
+	*out_start = __DECONST(void *, entitlements);
+	*out_length = ntohl(entitlements->length);
+
+	return 0;
+}
+
+/* Monterey read-only ABI; validate the DER blob against signed slot 7. */
+int
+csblob_get_der_entitlements(struct cs_blob *csblob, void **out_start, size_t *out_length)
+{
+	uint8_t computed_hash[CS_HASH_MAX_SIZE];
+	const CS_GenericBlob *entitlements;
+	const CS_CodeDirectory *code_dir;
+	const uint8_t *embedded_hash;
+	union cs_hash_union context;
+
+	*out_start = NULL;
+	*out_length = 0;
+
+	if (csblob->csb_hashtype == NULL || csblob->csb_hashtype->cs_digest_size > sizeof(computed_hash)) {
+		return EBADEXEC;
+	}
+
+	code_dir = csblob->csb_cd;
+
+	if ((csblob->csb_flags & CS_VALID) == 0) {
+		entitlements = NULL;
+	} else {
+		entitlements = csblob_find_blob(csblob, CSSLOT_DER_ENTITLEMENTS,
+		    CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
+	}
+	embedded_hash = find_special_slot(code_dir, csblob->csb_hashtype->cs_size, CSSLOT_DER_ENTITLEMENTS);
 
 	if (embedded_hash == NULL) {
 		if (entitlements) {
@@ -3080,7 +3147,7 @@ ubc_cs_reconstitute_code_signature(struct cs_blob const *blob, vm_size_t optiona
 {
 	const CS_CodeDirectory  *old_cd, *cd;
 	CS_CodeDirectory        *new_cd;
-	const CS_GenericBlob *entitlements;
+	const CS_GenericBlob *entitlements, *der_entitlements;
 	vm_offset_t     new_blob_addr;
 	vm_size_t       new_blob_size;
 	vm_size_t       new_cdsize;
@@ -3088,6 +3155,8 @@ ubc_cs_reconstitute_code_signature(struct cs_blob const *blob, vm_size_t optiona
 	int                             error;
 
 	old_cd = blob->csb_cd;
+	der_entitlements = csblob_find_blob_bytes((const uint8_t *)blob->csb_mem_kaddr,
+	    blob->csb_mem_size, CSSLOT_DER_ENTITLEMENTS, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
 
 	new_cdsize = optional_new_cd_size != 0 ? optional_new_cd_size : htonl(old_cd->length);
 
@@ -3099,6 +3168,10 @@ ubc_cs_reconstitute_code_signature(struct cs_blob const *blob, vm_size_t optiona
 		/* We need to add a slot for the entitlements */
 		new_blob_size += sizeof(CS_BlobIndex);
 		new_blob_size += ntohl(blob->csb_entitlements_blob->length);
+	}
+
+	if (der_entitlements) {
+		new_blob_size += sizeof(CS_BlobIndex) + ntohl(der_entitlements->length);
 	}
 
 	kr = ubc_cs_blob_allocate(&new_blob_addr, &new_blob_size);
@@ -3115,23 +3188,28 @@ ubc_cs_reconstitute_code_signature(struct cs_blob const *blob, vm_size_t optiona
 	new_superblob = (CS_SuperBlob *)new_blob_addr;
 	new_superblob->magic = htonl(CSMAGIC_EMBEDDED_SIGNATURE);
 	new_superblob->length = htonl((uint32_t)new_blob_size);
-	if (blob->csb_entitlements_blob) {
-		vm_size_t                       ent_offset, cd_offset;
-
-		cd_offset  = sizeof(CS_SuperBlob) + 2 * sizeof(CS_BlobIndex);
-		ent_offset = cd_offset +  new_cdsize;
-
-		new_superblob->count = htonl(2);
+	if (blob->csb_entitlements_blob || der_entitlements) {
+		uint32_t count = 1 + (blob->csb_entitlements_blob != NULL) + (der_entitlements != NULL);
+		vm_size_t cd_offset = sizeof(CS_SuperBlob) + count * sizeof(CS_BlobIndex);
+		vm_size_t offset = cd_offset + new_cdsize;
+		uint32_t index = 1;
+		new_superblob->count = htonl(count);
 		new_superblob->index[0].type = htonl(CSSLOT_CODEDIRECTORY);
 		new_superblob->index[0].offset = htonl((uint32_t)cd_offset);
-		new_superblob->index[1].type = htonl(CSSLOT_ENTITLEMENTS);
-		new_superblob->index[1].offset = htonl((uint32_t)ent_offset);
-
-		memcpy((void *)(new_blob_addr + ent_offset), blob->csb_entitlements_blob, ntohl(blob->csb_entitlements_blob->length));
-
+		if (blob->csb_entitlements_blob) {
+			vm_size_t size = ntohl(blob->csb_entitlements_blob->length);
+			new_superblob->index[index].type = htonl(CSSLOT_ENTITLEMENTS);
+			new_superblob->index[index++].offset = htonl((uint32_t)offset);
+			memcpy((void *)(new_blob_addr + offset), blob->csb_entitlements_blob, size);
+			offset += size;
+		}
+		if (der_entitlements) {
+			new_superblob->index[index].type = htonl(CSSLOT_DER_ENTITLEMENTS);
+			new_superblob->index[index].offset = htonl((uint32_t)offset);
+			memcpy((void *)(new_blob_addr + offset), der_entitlements, ntohl(der_entitlements->length));
+		}
 		new_cd = (CS_CodeDirectory *)(new_blob_addr + cd_offset);
 	} else {
-		// Blob is the code directory, directly.
 		new_cd = (CS_CodeDirectory *)new_blob_addr;
 	}
 
@@ -3327,6 +3405,7 @@ cs_blob_create_validated(
 	blob->csb_entitlements_blob = NULL;
 	blob->csb_entitlements = NULL;
 	blob->csb_reconstituted = false;
+	blob->csb_macho_platform = 0;
 
 	/* Transfer ownership. Even on error, this function will deallocate */
 	*addr = 0;
@@ -3413,6 +3492,7 @@ cs_blob_free(
 			blob->csb_mem_kaddr = 0;
 		}
 		if (blob->csb_entitlements != NULL) {
+			ravyn_amfi_entitlements_invalidate(blob->csb_entitlements);
 			osobject_release(blob->csb_entitlements);
 			blob->csb_entitlements = NULL;
 		}
@@ -3421,15 +3501,18 @@ cs_blob_free(
 }
 
 int
-ubc_cs_blob_add(
-	struct vnode    *vp,
-	cpu_type_t      cputype,
-	off_t           base_offset,
-	vm_address_t    *addr,
-	vm_size_t       size,
-	struct image_params *imgp,
-	__unused int    flags,
-	struct cs_blob  **ret_blob)
+ubc_cs_blob_add(struct vnode *vp, cpu_type_t cputype, off_t base_offset,
+    vm_address_t *addr, vm_size_t size, struct image_params *imgp,
+    int flags, struct cs_blob **ret_blob)
+{
+    return ubc_cs_blob_add_platform(vp, cputype, base_offset, addr, size,
+        imgp, flags, ret_blob, 0);
+}
+
+int
+ubc_cs_blob_add_platform(struct vnode *vp, cpu_type_t cputype, off_t base_offset,
+    vm_address_t *addr, vm_size_t size, struct image_params *imgp,
+    int flags, struct cs_blob **ret_blob, uint32_t platform)
 {
 	kern_return_t           kr;
 	struct ubc_info         *uip;
@@ -3454,6 +3537,7 @@ ubc_cs_blob_add(
 	}
 
 	blob->csb_cpu_type = cputype;
+	blob->csb_macho_platform = platform;
 	blob->csb_base_offset = base_offset;
 
 	/*
@@ -3830,6 +3914,33 @@ ubc_cs_free(
 	ubc_cs_validation_bitmap_deallocate( uip->ui_vnode );
 #endif
 	uip->cs_blobs = NULL;
+}
+
+
+/* Caller has the vnode lock and the inactive-path exclusive iocount. */
+void
+ubc_cs_free_and_vnode_unlock(vnode_t vp)
+{
+    struct ubc_info *uip = vp->v_ubcinfo;
+    struct cs_blob *blob, *next;
+    if (!(uip->ui_flags & UI_CSBLOBINVALID)) {
+        vnode_unlock(vp);
+        return;
+    }
+    uip->ui_flags &= ~UI_CSBLOBINVALID;
+    blob = uip->cs_blobs;
+    uip->cs_blobs = NULL;
+    uip->cs_add_gen = 0;
+#if CHECK_CS_VALIDATION_BITMAP
+    ubc_cs_validation_bitmap_deallocate(vp);
+#endif
+    vnode_unlock(vp);
+    for (; blob != NULL; blob = next) {
+        next = blob->csb_next;
+        OSAddAtomic(-1, &cs_blob_count);
+        OSAddAtomic((SInt32)-blob->csb_mem_size, &cs_blob_size);
+        cs_blob_free(blob);
+    }
 }
 
 /* check cs blob generation on vnode

@@ -22,11 +22,22 @@
  * project, and extensively modified by Zoe Knox in 2026 to support ravynOS.
  * This notice is included in support of clause 2.2(b) of the License.
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #ifndef _IOKIT_APPLEI386PLATFORM_H
 #define _IOKIT_APPLEI386PLATFORM_H
 
 #include <IOKit/IOPlatformExpert.h>
+#ifdef RAVYN_APPLE_ACPI_INTERFACE
+#include "include/apple-acpi/IOACPIPlatformExpert.h"
+#define RAVYN_ACPI_SUPER IOACPIPlatformExpert
+#else
+#define RAVYN_ACPI_SUPER IOPlatformExpert
+#endif
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
 #include <IOKit/acpi/IOACPITypes.h>
 
@@ -95,15 +106,15 @@ enum {
 	kSystemIRQCount = 128
 };
 
-class IOACPIPlatformExpertGlobals {
+class RavynACPIPlatformGlobals {
 public:
     bool isInitialized;
-    IOACPIPlatformExpertGlobals();
-    ~IOACPIPlatformExpertGlobals();
+    RavynACPIPlatformGlobals();
+    ~RavynACPIPlatformGlobals();
     inline bool isValid() const;
 };
 
-class ACPIPlatformExpert : public IOPlatformExpert {
+class ACPIPlatformExpert : public RAVYN_ACPI_SUPER {
     OSDeclareDefaultStructors(ACPIPlatformExpert)
     friend class IOACPIPlatformDevice;
 
@@ -202,6 +213,8 @@ public:
     virtual bool setNubInterruptVectors(IOService *nub, const UInt32 vectors[], UInt32 vectorCount);
     virtual bool setNubInterruptVector(IOService *nub, UInt32 vector);
     virtual IOReturn callPlatformFunction(const OSSymbol *functionName, bool waitForFunction, void *param1, void *param2, void *param3, void *param4) APPLE_KEXT_OVERRIDE;
+    virtual long getGMTTimeOfDay(void) APPLE_KEXT_OVERRIDE;
+    virtual void setGMTTimeOfDay(long secs) APPLE_KEXT_OVERRIDE;
     virtual bool getModelName(char *name, int maxLengh) APPLE_KEXT_OVERRIDE;
     virtual bool getMachineName(char *name, int maxLength) APPLE_KEXT_OVERRIDE;
     virtual void setupAPIC(IOService *nub);

@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #ifdef  MACH_BSD
 #include <mach_debug.h>
 #include <mach_ldebug.h>
@@ -45,6 +50,7 @@
 #include <kern/debug.h>
 #include <kern/spl.h>
 #include <kern/syscall_sw.h>
+#include <security/mac_mach_internal.h>
 #include <ipc/ipc_port.h>
 #include <vm/vm_kern.h>
 #include <vm/pmap.h>
@@ -552,7 +558,15 @@ mach_call_munger(x86_saved_state_t *state)
 	    MACHDBG_CODE(DBG_MACH_EXCP_SC, (call_number)) | DBG_FUNC_START,
 	    args.arg1, args.arg2, args.arg3, args.arg4, 0);
 
-	retval = mach_call(&args);
+#if CONFIG_MACF
+    retval = mac_task_check_mach_filter(current_task(), (struct proc *)get_bsdtask_info(current_task()), call_number);
+    if (retval != KERN_SUCCESS) {
+        if (mac_mach_trap_returns_port(call_number)) retval = MACH_PORT_NULL;
+    } else
+#endif
+    {
+        retval = mach_call(&args);
+    }
 
 	DEBUG_KPRINT_SYSCALL_MACH("mach_call_munger: retval=0x%x\n", retval);
 
@@ -653,7 +667,15 @@ mach_call_munger64(x86_saved_state_t *state)
 	mach_kauth_cred_uthread_update();
 #endif
 
-	regs->rax = (uint64_t)mach_call((void *)&args);
+#if CONFIG_MACF
+    int filter_error = mac_task_check_mach_filter(current_task(), (struct proc *)get_bsdtask_info(current_task()), call_number);
+    if (filter_error != KERN_SUCCESS) {
+        regs->rax = mac_mach_trap_returns_port(call_number) ? MACH_PORT_NULL : filter_error;
+    } else
+#endif
+    {
+        regs->rax = (uint64_t)mach_call((void *)&args);
+    }
 
 	DEBUG_KPRINT_SYSCALL_MACH( "mach_call_munger64: retval=0x%llx\n", regs->rax);
 

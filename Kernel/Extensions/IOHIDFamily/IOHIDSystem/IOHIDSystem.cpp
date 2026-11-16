@@ -20,6 +20,11 @@
  *
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #define DEBUG_ASSERT_COMPONENT_NAME_STRING "IOHIDSystem"
 //#define DEBUG_ASSERT_PRODUCTION_CODE 0
@@ -49,6 +54,7 @@
 #include <kern/clock.h>
 #include "IOHIDShared.h"
 #include "IOHIDSystem.h"
+#include "IOHIPointing.h"
 //#include "IOHIDEventService.h"
 //#include "IOHIDPointing.h"
 //#include "IOHIDKeyboard.h"
@@ -59,7 +65,7 @@
 #include "IOHIDKeyboardDevice.h"
 #include "IOHIDPrivate.h"
 #include "IOHIDPrivateKeys.h"
-//#include "IOHIDEventServiceQueue.h"
+#include "IOHIDEventServiceQueue.h"
 #include "IOLLEvent.h"
 #include "IOHIDPointingEventDevice.h"
 #include "IOHIDKeyboardEventDevice.h"
@@ -337,6 +343,12 @@ struct IOHIDSystem::ExpansionData
     OSArray                 *delayedNotificationArray;
     thread_call_t           delayedNotificationThread;
     
+    UInt64                  legacyClickTime[2];
+    IOGPoint                legacyClickLocation[2];
+    UInt32                  legacyClickCount[2];
+    SInt16                  legacyButtonEvent[2];
+    UInt32                  legacyPointerLogged;
+
     UInt32                  onScreenPinMask;
     IOGBounds               onScreenBounds[EV_MAX_SCREENS];
     
@@ -1596,16 +1608,16 @@ void IOHIDSystem::dispatchEvent(IOHIDEvent *event, IOOptionBits options __unused
         return;
 
     OSCollectionIterator *      iterator    = OSCollectionIterator::withCollection(dataQueueSet);
-#ifdef NEW_HID
     IOHIDEventServiceQueue *    dataQueue   = NULL;
 
     if ( !iterator )
         return;
 
     while ((dataQueue = OSDynamicCast(IOHIDEventServiceQueue, iterator->getNextObject()))) {
-        dataQueue->enqueueEvent(event);
+        bool delivered = dataQueue->enqueueEvent(event);
+        static unsigned logged = 0;
+        if (logged++ < 12) IOLog("IOHIDSystem: queue event type=%u size=%u accepted=%d\n", event->getType(), (unsigned)event->getLength(), delivered);
     }
-#endif
 
     iterator->release();
 
@@ -1736,6 +1748,8 @@ void IOHIDSystem::postEvent(int           what,
     nxEvent.payload.flags        = eventFlags();
 
    
+    static unsigned postedLogged = 0;
+    if (postedLogged++ < 12) IOLog("IOHIDSystem: posting NX type=%d location=%d,%d source=%llu\n", what, nxEvent.payload.location.x, nxEvent.payload.location.y, nxEvent.payload.service_id);
     proc_t process =  proc_self();
     if (process) {
         kauth_cred_t cred = kauth_cred_proc_ref(process);
@@ -2179,6 +2193,8 @@ IOReturn IOHIDSystem::updateParamPropertiesGated(IOService * source) {
 // Try to get ownership of the device. If we get it, add it to
 // the list.
 //
+#include "IOHIDLegacyPointer.inc"
+
 bool IOHIDSystem::registerEventSource(IOService * source)
 {
     bool success = true;
@@ -2190,6 +2206,10 @@ bool IOHIDSystem::registerEventSource(IOService * source)
                     (KeyboardEventCallback)        _keyboardEvent,
                     (KeyboardSpecialEventCallback) _keyboardSpecialEvent,
                     (UpdateEventFlagsCallback)     _updateEventFlags);
+    } else if (OSDynamicCast(IOHIPointing, source)) {
+      success = static_cast<IOHIPointing *>(source)->open(this, kIOServiceSeize, 0,
+                    legacyRelativePointer, legacyAbsolutePointer, legacyScrollWheel);
+      IOLog("IOHIDSystem: pointing source %s open=%d\n", source->getName(), success);
     }
 
     if ( success )

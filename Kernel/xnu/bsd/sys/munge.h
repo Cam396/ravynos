@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #ifndef __MUNGE_H__
 #define __MUNGE_H__
@@ -102,6 +107,7 @@ int munge_wwwl(const void *regs, void *args);
 int munge_wwwwlw(const void *regs, void *args);
 int munge_wwwwl(const void *regs, void *args);
 int munge_wwwwwl(const void *regs, void *args);
+int munge_wwwwllww(const void *regs, void *args);
 int munge_wwwwwlww(const void *regs, void *args);
 int munge_wwwwwllw(const void *regs, void *args);
 int munge_wwwwwlll(const void *regs, void *args);
@@ -152,6 +158,7 @@ void munge_wwwl(void *args);
 void munge_wwwwlw(void *args);
 void munge_wwwwl(void *args);
 void munge_wwwwwl(void *args);
+void munge_wwwwllww(void *args);
 void munge_wwwwwlww(void *args);
 void munge_wwwwwllw(void *args);
 void munge_wwwwwlll(void *args);

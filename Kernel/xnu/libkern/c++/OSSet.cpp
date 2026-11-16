@@ -25,12 +25,18 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* IOSet.m created by rsulack on Thu 11-Jun-1998 */
 
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSSerialize.h>
 #include <libkern/c++/OSSet.h>
+#include <libkern/c++/OSSharedPtr.h>
 
 #define super OSCollection
 
@@ -468,4 +474,10 @@ abortCopy:
 	}
 
 	return ret;
+}
+
+bool
+OSSet::setObject(const OSSharedPtr<const OSMetaClassBase>& object)
+{
+    return setObject(object.get());
 }

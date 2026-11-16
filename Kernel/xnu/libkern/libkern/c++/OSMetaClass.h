@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #ifndef _LIBKERN_OSMETACLASS_H
 #define _LIBKERN_OSMETACLASS_H
 
@@ -32,6 +37,9 @@
 
 #include <libkern/OSReturn.h>
 #include <kern/debug.h>
+#if KERNEL_PRIVATE
+#include <kern/zalloc.h>
+#endif
 #include <ptrauth.h>
 
 /*
@@ -1255,6 +1263,12 @@ protected:
 	    const OSMetaClass  * superclass,
 	    unsigned int         classSize);
 
+#if KERNEL_PRIVATE
+	OSMetaClass(const char *className, const OSMetaClass *superclass,
+	    unsigned int classSize, zone_t *zone, const char *zoneName,
+	    zone_create_flags_t flags);
+#endif
+
 
 /*!
  * @function ~OSMetaClass
@@ -1699,6 +1713,8 @@ public:
  */
 	const char * getClassName() const;
 	const OSSymbol * getClassNameSymbol() const;
+	/* Owned symbol, including pre-registration C-string class names. */
+	const OSSymbol * copyClassNameSymbol() const;
 
 
 /*!

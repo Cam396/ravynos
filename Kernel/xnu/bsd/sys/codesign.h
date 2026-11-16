@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #ifndef _SYS_CODESIGN_H_
 #define _SYS_CODESIGN_H_
@@ -59,6 +64,7 @@
 #define CS_OPS_CLEARPLATFORM 13 /* clear platform binary status (DEVELOPMENT-only) */
 #define CS_OPS_TEAMID       14  /* get team id */
 #define CS_OPS_CLEAR_LV     15  /* clear the library validation flag */
+#define CS_OPS_DER_ENTITLEMENTS_BLOB 16 /* get signed DER entitlements blob */
 
 #define CS_MAX_TEAMID_LEN       64
 
@@ -125,6 +131,7 @@ int csproc_check_invalid_allowed(struct proc* p);
 int csproc_hardened_runtime(struct proc* p);
 
 int             csblob_get_entitlements(struct cs_blob *, void **, size_t *);
+int             csblob_get_der_entitlements(struct cs_blob *, void **, size_t *);
 
 const CS_GenericBlob *
     csblob_find_blob(struct cs_blob *, uint32_t, uint32_t);

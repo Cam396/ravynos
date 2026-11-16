@@ -80,6 +80,11 @@
  * Version 2.0.
  *
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*
  * System calls related to processes and protection
@@ -2027,6 +2032,21 @@ setlogin(proc_t p, struct setlogin_args *uap, __unused int32_t *retval)
  * XXX This needs to change to give the task a reference and/or an opaque
  * XXX identifier.
  */
+/* Keep parent snapshots and task token publication on the same layout. */
+static void
+proc_calc_audit_token(proc_t p, kauth_cred_t cred, audit_token_t *token)
+{
+	posix_cred_t pcred = posix_cred_get(cred);
+	token->val[0] = cred->cr_audit.as_aia_p->ai_auid;
+	token->val[1] = pcred->cr_uid;
+	token->val[2] = pcred->cr_gid;
+	token->val[3] = pcred->cr_ruid;
+	token->val[4] = pcred->cr_rgid;
+	token->val[5] = p->p_pid;
+	token->val[6] = cred->cr_audit.as_aia_p->ai_asid;
+	token->val[7] = p->p_idversion;
+}
+
 int
 set_security_token(proc_t p)
 {
@@ -2045,7 +2065,6 @@ set_security_token_task_internal(proc_t p, void *t)
 	security_token_t sec_token;
 	audit_token_t    audit_token;
 	kauth_cred_t my_cred;
-	posix_cred_t my_pcred;
 	host_priv_t host_priv;
 	task_t task = t;
 
@@ -2064,7 +2083,6 @@ set_security_token_task_internal(proc_t p, void *t)
 	}
 
 	my_cred = kauth_cred_proc_ref(p);
-	my_pcred = posix_cred_get(my_cred);
 
 	/* XXX mach_init doesn't have a p_ucred when it calls this function */
 	if (IS_VALID_CRED(my_cred)) {
@@ -2084,14 +2102,7 @@ set_security_token_task_internal(proc_t p, void *t)
 	 * the user of the trailer from future representation
 	 * changes.
 	 */
-	audit_token.val[0] = my_cred->cr_audit.as_aia_p->ai_auid;
-	audit_token.val[1] = my_pcred->cr_uid;
-	audit_token.val[2] = my_pcred->cr_gid;
-	audit_token.val[3] = my_pcred->cr_ruid;
-	audit_token.val[4] = my_pcred->cr_rgid;
-	audit_token.val[5] = p->p_pid;
-	audit_token.val[6] = my_cred->cr_audit.as_aia_p->ai_asid;
-	audit_token.val[7] = p->p_idversion;
+	proc_calc_audit_token(p, my_cred, &audit_token);
 
 	host_priv = (sec_token.val[0]) ? HOST_PRIV_NULL : host_priv_self();
 #if CONFIG_MACF
@@ -2113,6 +2124,20 @@ set_security_token_task_internal(proc_t p, void *t)
 	           sec_token,
 	           audit_token,
 	           host_priv) != KERN_SUCCESS;
+}
+
+
+/* p and token_out must be valid, as for the pinned reference private KPI.
+ * The list lock pins the parent relation while credentials are sampled. */
+void
+proc_parent_audit_token(proc_t p, audit_token_t *token_out)
+{
+	proc_list_lock();
+	proc_t parent = p->p_pptr;
+	kauth_cred_t cred = kauth_cred_proc_ref(parent);
+	proc_calc_audit_token(parent, cred, token_out);
+	kauth_cred_unref(&cred);
+	proc_list_unlock();
 }
 
 

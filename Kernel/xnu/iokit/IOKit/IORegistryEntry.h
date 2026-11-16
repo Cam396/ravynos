@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Copyright (c) 1998 Apple Computer, Inc.  All rights reserved.
  *
  * HISTORY
@@ -590,6 +595,8 @@ public:
  *   @result The maximum number of entries between the entry and the root. Zero is returned if the entry is not attached in the plane. */
 
 	virtual unsigned int getDepth( const IORegistryPlane * plane ) const;
+	bool propertyExists(const char *key, const IORegistryPlane *plane,
+	    unsigned int options) const;
 
 /* Attach / detach */
 

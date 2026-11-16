@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -114,6 +119,19 @@
 
 lck_grp_t       zone_locks_grp;
 lck_grp_attr_t  zone_locks_grp_attr;
+
+/* Monterey RO zones: one protected page per live element, with controlled
+ * writes through x86's physical aperture, as in the XNU pmap RO-zone path. */
+#define RAVYN_RO_ZONE_COUNT 4
+#define RAVYN_RO_ZONE_ID_BASE 9
+struct ravyn_ro_zone { boolean_t created; zone_id_t zone_id; vm_size_t elem_size; zone_create_flags_t flags; };
+struct ravyn_ro_allocation { struct ravyn_ro_allocation *next; vm_offset_t address; zone_id_t zone_id; vm_size_t elem_size; };
+static struct ravyn_ro_zone ravyn_ro_zones[RAVYN_RO_ZONE_COUNT];
+static struct ravyn_ro_allocation *ravyn_ro_allocations;
+static lck_mtx_t ravyn_ro_lock;
+static lck_mtx_ext_t ravyn_ro_lock_ext;
+static lck_attr_t ravyn_ro_lock_attr;
+static boolean_t ravyn_ro_lock_ready;
 
 /*
  *  ZONE_ALIAS_ADDR (deprecated)
@@ -1221,6 +1239,8 @@ zone_element_was_modified_panic(zone_t        zone,
     vm_offset_t   expected,
     vm_offset_t   offset)
 {
+    extern void ravyn_data_history_dump(void *address);
+    ravyn_data_history_dump((void *)element);
 	panic("a freed zone element has been modified in zone %s: expected %p but found %p, bits changed %p, at offset %d of %d in element %p, cookies %p %p",
 	    zone->zone_name,
 	    (void *)   expected,
@@ -2413,6 +2433,7 @@ zinit(
 	z->zone_destruction = FALSE;
 	z->cpu_cache_enabled = FALSE;
 	z->clear_memory = FALSE;
+	z->zero_on_free = FALSE;
 
 #if CONFIG_ZLEAKS
 	z->zleak_capture = 0;
@@ -3064,6 +3085,9 @@ zone_bootstrap(void)
 	/* initializing global lock group for zones */
 	lck_grp_attr_setdefault(&zone_locks_grp_attr);
 	lck_grp_init(&zone_locks_grp, "zone_locks", &zone_locks_grp_attr);
+	lck_attr_setdefault(&ravyn_ro_lock_attr);
+	lck_mtx_init_ext(&ravyn_ro_lock, &ravyn_ro_lock_ext, &zone_locks_grp, &ravyn_ro_lock_attr);
+	ravyn_ro_lock_ready = TRUE;
 
 	lck_attr_setdefault(&zone_metadata_lock_attr);
 	lck_mtx_init_ext(&zone_metadata_region_lck, &zone_metadata_region_lck_ext, &zone_locks_grp, &zone_metadata_lock_attr);
@@ -3274,6 +3298,247 @@ zone_init(
 	    jetsam_limit_temp > 0 && jetsam_limit_temp <= 100) {
 		zone_map_jetsam_limit = jetsam_limit_temp;
 	}
+}
+
+
+/* Read-only zone compatibility for Monterey's Sandbox. */
+extern vm_offset_t vm_kernel_stext, vm_kernel_etext;
+#if defined(__arm64__)
+#include <libkern/kernel_mach_header.h>
+#else
+extern vm_offset_t sconst, econst;
+#endif
+
+static boolean_t
+ravyn_ro_lock_acquire(boolean_t nowait)
+{
+	if (!ravyn_ro_lock_ready) return FALSE;
+	if (nowait) return lck_mtx_try_lock(&ravyn_ro_lock);
+	lck_mtx_lock(&ravyn_ro_lock);
+	return TRUE;
+}
+
+static struct ravyn_ro_zone *
+ravyn_ro_zone_locked(zone_id_t zid)
+{
+	if (zid < RAVYN_RO_ZONE_ID_BASE || zid >= RAVYN_RO_ZONE_ID_BASE + RAVYN_RO_ZONE_COUNT) return NULL;
+	struct ravyn_ro_zone *zone = &ravyn_ro_zones[zid - RAVYN_RO_ZONE_ID_BASE];
+	return zone->created ? zone : NULL;
+}
+
+static struct ravyn_ro_allocation *
+ravyn_ro_find_locked(zone_id_t zid, vm_offset_t address)
+{
+	for (struct ravyn_ro_allocation *e=ravyn_ro_allocations; e; e=e->next)
+		if (e->address==address && e->zone_id==zid) return e;
+	return NULL;
+}
+
+static vm_offset_t
+ravyn_ro_phys_alias(vm_offset_t address)
+{
+	pmap_paddr_t pa=kvtophys(address);
+	if (!pa) panic("RO zone: unmapped address %p",(void *)address);
+	return (vm_offset_t)phystokv(pa);
+}
+
+static boolean_t
+ravyn_ro_source_is_const(vm_offset_t address, vm_size_t size)
+{
+	vm_offset_t end;
+	if (__builtin_add_overflow(address,size,&end)) return FALSE;
+	if (address>=vm_kernel_stext && end<=vm_kernel_etext) return TRUE;
+#if defined(__arm64__)
+	unsigned long const_size = 0;
+	vm_offset_t const_start = (vm_offset_t)getsegdatafromheader(
+	    &_mh_execute_header, "__DATA_CONST", &const_size);
+	vm_offset_t const_end;
+	if (!const_start || __builtin_add_overflow(const_start, const_size, &const_end))
+		return FALSE;
+	return address>=const_start && end<=const_end;
+#else
+	return address>=sconst && end<=econst;
+#endif
+}
+
+static boolean_t
+ravyn_ro_source_is_stack(vm_offset_t address, vm_size_t size)
+{
+	thread_t thread=current_thread();
+	vm_offset_t end, stack_end;
+	if (thread==THREAD_NULL || __builtin_add_overflow(address,size,&end) ||
+	    __builtin_add_overflow(thread->kernel_stack,kernel_stack_size,&stack_end)) return FALSE;
+	return address>=thread->kernel_stack && end<=stack_end;
+}
+
+zone_id_t
+zone_create_ro(const char *name, vm_size_t size, zone_create_flags_t flags,
+    zone_create_ro_id_t zc_ro_id)
+{
+	zone_id_t zid;
+	const zone_create_flags_t supported=ZC_READONLY|ZC_ZFREE_CLEARMEM|ZC_NOGC|ZC_NOCACHING;
+	if (!name || !size || size>PAGE_SIZE || zc_ro_id>ZC_RO_ID__LAST || (flags&~supported))
+		panic("zone_create_ro: invalid descriptor name=%p size=%lu id=%u flags=0x%llx",
+		    name,(unsigned long)size,zc_ro_id,(unsigned long long)flags);
+	zid=RAVYN_RO_ZONE_ID_BASE+zc_ro_id;
+	if (!ravyn_ro_lock_acquire(FALSE)) panic("zone_create_ro: allocator lock not initialized");
+	struct ravyn_ro_zone *zone=&ravyn_ro_zones[zc_ro_id];
+	if (zone->created) { lck_mtx_unlock(&ravyn_ro_lock); panic("zone_create_ro: duplicate id %u",zid); }
+	zone->zone_id=zid; zone->elem_size=size; zone->flags=flags|ZC_READONLY; zone->created=TRUE;
+	lck_mtx_unlock(&ravyn_ro_lock);
+	return zid;
+}
+
+void *
+zalloc_ro(zone_id_t zid, zalloc_flags_t flags)
+{
+	struct ravyn_ro_zone *zone;
+	struct ravyn_ro_allocation *entry;
+	vm_size_t elem_size;
+	vm_offset_t address=0;
+	kern_return_t kr;
+	boolean_t nowait=(flags&Z_NOWAIT)!=0;
+	boolean_t nopagewait=(flags&(Z_NOWAIT|Z_NOPAGEWAIT))!=0;
+	const zalloc_flags_t supported=Z_NOWAIT|Z_NOPAGEWAIT|Z_ZERO|Z_NOFAIL;
+	if ((flags&~supported) || ((flags&Z_NOWAIT)&&(flags&Z_NOPAGEWAIT)))
+		panic("zalloc_ro: invalid flags 0x%x",flags);
+	if ((flags&Z_NOFAIL)&&nopagewait) panic("zalloc_ro: Z_NOFAIL with no-wait flags");
+	if (!ravyn_ro_lock_acquire(nowait)) return NULL;
+	zone=ravyn_ro_zone_locked(zid);
+	if (!zone) { lck_mtx_unlock(&ravyn_ro_lock); panic("zalloc_ro: unknown zone %u",zid); }
+	elem_size=zone->elem_size;
+	lck_mtx_unlock(&ravyn_ro_lock);
+	entry=(nopagewait)?kalloc_noblock(sizeof(*entry)):kalloc(sizeof(*entry));
+	if (!entry) { if (flags&Z_NOFAIL) panic("zalloc_ro: metadata allocation failed"); return NULL; }
+	kr=kernel_memory_allocate(kernel_map,&address,PAGE_SIZE,0,
+	    KMA_KOBJECT|KMA_ZERO|(nopagewait?KMA_NOPAGEWAIT:0),VM_KERN_MEMORY_ZONE);
+	if (kr!=KERN_SUCCESS) {
+		kfree(entry,sizeof(*entry));
+		if (flags&Z_NOFAIL) panic("zalloc_ro: page allocation failed (%d)",kr);
+		return NULL;
+	}
+	pmap_protect(pmap_kernel(),address,address+PAGE_SIZE,VM_PROT_READ);
+	entry->address=address; entry->zone_id=zid; entry->elem_size=elem_size;
+	if (!ravyn_ro_lock_acquire(nowait)) {
+		kmem_free(kernel_map,address,PAGE_SIZE); kfree(entry,sizeof(*entry)); return NULL;
+	}
+	if (!ravyn_ro_zone_locked(zid)) {
+		lck_mtx_unlock(&ravyn_ro_lock); kmem_free(kernel_map,address,PAGE_SIZE);
+		kfree(entry,sizeof(*entry)); panic("zalloc_ro: zone disappeared");
+	}
+	entry->next=ravyn_ro_allocations; ravyn_ro_allocations=entry;
+	lck_mtx_unlock(&ravyn_ro_lock);
+	return (void *)address;
+}
+
+void
+zone_require_ro(zone_id_t zid, vm_size_t elem_size, void *addr)
+{
+	if (!ravyn_ro_lock_acquire(FALSE)) panic("zone_require_ro: allocator lock not initialized");
+	struct ravyn_ro_allocation *e=ravyn_ro_find_locked(zid,(vm_offset_t)addr);
+	if (!e || e->elem_size!=elem_size) {
+		lck_mtx_unlock(&ravyn_ro_lock);
+		panic("zone_require_ro: invalid element %p zone %u size %lu",addr,zid,(unsigned long)elem_size);
+	}
+	lck_mtx_unlock(&ravyn_ro_lock);
+}
+
+void
+zalloc_ro_mut(zone_id_t zid, void *elem, vm_offset_t offset, const void *new_data,
+    vm_size_t size)
+{
+	struct ravyn_ro_allocation *dst;
+	vm_offset_t src=(vm_offset_t)new_data;
+	boolean_t source_ok=FALSE;
+	if (!new_data || !size) return;
+	if (!ravyn_ro_lock_acquire(FALSE)) panic("zalloc_ro_mut: allocator lock not initialized");
+	dst=ravyn_ro_find_locked(zid,(vm_offset_t)elem);
+	if (!dst || offset>dst->elem_size || size>dst->elem_size-offset) {
+		lck_mtx_unlock(&ravyn_ro_lock);
+		panic("zalloc_ro_mut: invalid destination %p+%lu size %lu zone %u",elem,(unsigned long)offset,(unsigned long)size,zid);
+	}
+	if (ravyn_ro_source_is_stack(src,size) || ravyn_ro_source_is_const(src,size)) source_ok=TRUE;
+	else {
+		vm_offset_t src_end;
+		if (!__builtin_add_overflow(src,size,&src_end))
+			for (struct ravyn_ro_allocation *e=ravyn_ro_allocations;e;e=e->next) {
+				vm_offset_t end=e->address+e->elem_size;
+				if (e->zone_id==zid && src>=e->address && src_end<=end) { source_ok=TRUE; break; }
+			}
+	}
+	if (!source_ok) {
+		lck_mtx_unlock(&ravyn_ro_lock);
+		panic("zalloc_ro_mut: source %p is not stack, const, or same-zone data",new_data);
+	}
+	vm_offset_t physical=kvtophys((vm_offset_t)elem+offset);
+	if (!physical) { lck_mtx_unlock(&ravyn_ro_lock); panic("zalloc_ro_mut: unmapped destination"); }
+	memcpy((void *)phystokv(physical),new_data,size);
+	lck_mtx_unlock(&ravyn_ro_lock);
+}
+
+static uint64_t
+ravyn_ro_atomic(vm_offset_t address, zro_atomic_op_t op, uint64_t value)
+{
+	uint32_t kind=op&0xf0, width=op&0x0f;
+	uint64_t old=0;
+#define RAVYN_RO_ATOMIC_TYPE(type) do { \
+	type *p=(type *)address; \
+	switch (kind) { \
+	case 0x10: old=__atomic_fetch_or(p,(type)value,__ATOMIC_SEQ_CST); break; \
+	case 0x20: old=__atomic_fetch_xor(p,(type)value,__ATOMIC_SEQ_CST); break; \
+	case 0x30: old=__atomic_fetch_and(p,(type)value,__ATOMIC_SEQ_CST); break; \
+	case 0x40: old=__atomic_fetch_add(p,(type)value,__ATOMIC_SEQ_CST); break; \
+	case 0x50: old=__atomic_exchange_n(p,(type)value,__ATOMIC_SEQ_CST); break; \
+	default: panic("zalloc_ro_mut_atomic: invalid op 0x%x",op); \
+	} \
+} while (0)
+	switch(width) {
+	case 1:RAVYN_RO_ATOMIC_TYPE(uint8_t);break;
+	case 2:RAVYN_RO_ATOMIC_TYPE(uint16_t);break;
+	case 4:RAVYN_RO_ATOMIC_TYPE(uint32_t);break;
+	case 8:RAVYN_RO_ATOMIC_TYPE(uint64_t);break;
+	default:panic("zalloc_ro_mut_atomic: invalid width %u",width);
+	}
+#undef RAVYN_RO_ATOMIC_TYPE
+	return old;
+}
+
+uint64_t
+zalloc_ro_mut_atomic(zone_id_t zid, void *elem, vm_offset_t offset,
+    zro_atomic_op_t op, uint64_t value)
+{
+	struct ravyn_ro_allocation *e;
+	vm_size_t width=op&0x0f;
+	uint64_t result;
+	if (!ravyn_ro_lock_acquire(FALSE)) panic("zalloc_ro_mut_atomic: allocator lock not initialized");
+	e=ravyn_ro_find_locked(zid,(vm_offset_t)elem);
+	if (!e || !width || offset>e->elem_size || width>e->elem_size-offset ||
+	    (offset&(width-1))) {
+		lck_mtx_unlock(&ravyn_ro_lock); panic("zalloc_ro_mut_atomic: invalid element/offset/width");
+	}
+	result=ravyn_ro_atomic(ravyn_ro_phys_alias((vm_offset_t)elem+offset),op,value);
+	lck_mtx_unlock(&ravyn_ro_lock);
+	return result;
+}
+
+void
+zfree_ro(zone_id_t zid, void *addr)
+{
+	struct ravyn_ro_allocation **cursor,*entry=NULL;
+	boolean_t clear;
+	if (!ravyn_ro_lock_acquire(FALSE)) panic("zfree_ro: allocator lock not initialized");
+	for (cursor=&ravyn_ro_allocations;*cursor;cursor=&(*cursor)->next)
+		if ((*cursor)->address==(vm_offset_t)addr && (*cursor)->zone_id==zid) {
+			entry=*cursor; *cursor=entry->next; break;
+		}
+	if (!entry) { lck_mtx_unlock(&ravyn_ro_lock); panic("zfree_ro: invalid element %p zone %u",addr,zid); }
+	struct ravyn_ro_zone *zone=ravyn_ro_zone_locked(zid);
+	if (!zone) { lck_mtx_unlock(&ravyn_ro_lock); panic("zfree_ro: unknown zone %u",zid); }
+	clear=(zone->flags&ZC_ZFREE_CLEARMEM)!=0;
+	if (clear) bzero((void *)ravyn_ro_phys_alias(entry->address),entry->elem_size);
+	lck_mtx_unlock(&ravyn_ro_lock);
+	kmem_free(kernel_map,entry->address,PAGE_SIZE);
+	kfree(entry,sizeof(*entry));
 }
 
 #pragma mark -
@@ -3755,6 +4020,12 @@ zalloc_nopagewait(zone_t zone)
 }
 
 void *
+zalloc_nopagewait_tag(zone_t zone, vm_size_t reqsize, vm_tag_t tag)
+{
+	return zalloc_internal(zone, TRUE, TRUE, reqsize, tag);
+}
+
+void *
 zalloc_canblock_tag(zone_t zone, boolean_t canblock, vm_size_t reqsize, vm_tag_t tag)
 {
 	return zalloc_internal(zone, canblock, FALSE, reqsize, tag);
@@ -3970,6 +4241,9 @@ void
 	}
 
 	if (!gzfreed) {
+		if (zone->zero_on_free) {
+			bzero(addr, zone->elem_size);
+		}
 		poison = zfree_poison_element(zone, elem);
 	}
 
@@ -5150,3 +5424,74 @@ run_zone_test(void)
 }
 
 #endif /* DEBUG || DEVELOPMENT */
+
+
+/* XNU 8020 allocation contracts on the native Darwin 19 zone allocator.
+ * Ordinary zones remain ordinary zone_t objects; never alias a modern view.
+ */
+zone_t
+zone_create(const char *name, vm_size_t size, zone_create_flags_t flags)
+{
+    const uint64_t supported = ZC_CACHING | ZC_NOCACHING | ZC_ZFREE_CLEARMEM | ZC_NOGC |
+        ZC_NOENCRYPT | ZC_ALIGNMENT_REQUIRED | ZC_NOGZALLOC | ZC_NOCALLOUT;
+    if (!name || !size || ((uint64_t)flags & ~supported) ||
+        ((flags & (ZC_CACHING | ZC_NOCACHING)) == (ZC_CACHING | ZC_NOCACHING)))
+        panic("zone_create: unsupported flags 0x%llx", (uint64_t)flags);
+    zone_t zone = zinit(size, 0, 0, name);
+    if (zone == ZONE_NULL) panic("zone_create: allocation failed");
+    /* Native zfree clears sensitive bytes before poison/cache insertion.
+     * Establish this contract before enabling the real per-CPU cache. */
+    zone->zero_on_free = (flags & ZC_ZFREE_CLEARMEM) != 0;
+    if (flags & ZC_CACHING) {
+        zone_change(zone, Z_CACHING_ENABLED, TRUE);
+    } else {
+        /* zinit may have enabled a boot-policy cache.  The new ordinary-zone
+         * adapter defaults to uncached and must also cancel pending enabling. */
+        zone->cpu_cache_enabled = FALSE;
+        zone->cpu_cache_enable_when_ready = FALSE;
+    }
+    if (flags & ZC_NOGC) zone_change(zone, Z_COLLECT, FALSE);
+    if (flags & ZC_NOENCRYPT) zone_change(zone, Z_NOENCRYPT, TRUE);
+    if (flags & ZC_ALIGNMENT_REQUIRED) zone_change(zone, Z_ALIGNMENT_REQUIRED, TRUE);
+    if (flags & ZC_NOGZALLOC) zone_change(zone, Z_GZALLOC_EXEMPT, TRUE);
+    if (flags & ZC_NOCALLOUT) zone_change(zone, Z_NOCALLOUT, TRUE);
+    return zone;
+}
+
+void *
+zalloc_flags(zone_t zone, zalloc_flags_t flags)
+{
+    const zalloc_flags_t supported = Z_NOWAIT | Z_NOPAGEWAIT | Z_ZERO | Z_NOFAIL;
+    if (zone == ZONE_NULL || (flags & ~supported) ||
+        ((flags & Z_NOFAIL) && (flags & Z_NOWAIT)))
+        panic("zalloc_flags: invalid zone/flags 0x%x", flags);
+    void *address;
+    if (flags & Z_NOWAIT) address = zalloc_noblock(zone);
+    else if (flags & Z_NOPAGEWAIT) address = zalloc_nopagewait(zone);
+    else address = zalloc(zone);
+    if (!address && (flags & Z_NOFAIL)) panic("zalloc_flags: no-fail allocation failed");
+    if (address && (flags & Z_ZERO)) {
+        vm_size_t size = zone->elem_size;
+#if KASAN_ZALLOC
+        size -= 2 * zone->kasan_redzone;
+#endif
+        bzero(address, size);
+    }
+    return address;
+}
+
+void
+kern_os_zfree(zone_t zone, void *address, vm_size_t size)
+{
+    if (!address) return;
+    zone_t owner = ZONE_NULL;
+    vm_size_t element_size = zone_element_size(address, &owner);
+    if (zone != ZONE_NULL && element_size && owner == zone) {
+        if (size > element_size) panic("kern_os_zfree: size exceeds zone element");
+        zfree(zone, address);
+    } else {
+        /* OSObject::operator new in this tree uses kalloc_tag_bt. Subclasses
+         * that override allocation therefore keep its matching sized free. */
+        kfree(address, size);
+    }
+}

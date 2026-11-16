@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Copyright (c) 1996 John S. Dyson
  * All rights reserved.
  *
@@ -174,6 +179,9 @@ struct pipe {
 __BEGIN_DECLS
 void pipeinit(void);
 extern int pipe_stat(struct pipe *, void *, int);
+#ifdef BSD_KERNEL_PRIVATE
+extern uint64_t pipe_id(struct pipe *);
+#endif
 __END_DECLS
 
 #endif  /* KERNEL */

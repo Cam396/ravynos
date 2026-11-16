@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #ifndef _KERN_CODESIGN_H_
 #define _KERN_CODESIGN_H_
@@ -90,6 +95,7 @@ enum {
 	CSMAGIC_EMBEDDED_SIGNATURE = 0xfade0cc0, /* embedded form of signature data */
 	CSMAGIC_EMBEDDED_SIGNATURE_OLD = 0xfade0b02,    /* XXX */
 	CSMAGIC_EMBEDDED_ENTITLEMENTS = 0xfade7171,     /* embedded entitlements */
+	CSMAGIC_EMBEDDED_DER_ENTITLEMENTS = 0xfade7172, /* DER encoded entitlements */
 	CSMAGIC_DETACHED_SIGNATURE = 0xfade0cc1, /* multi-arch collection of embedded signatures */
 	CSMAGIC_BLOBWRAPPER = 0xfade0b01,       /* CMS Signature, among other things */
 
@@ -104,6 +110,7 @@ enum {
 	CSSLOT_RESOURCEDIR = 3,
 	CSSLOT_APPLICATION = 4,
 	CSSLOT_ENTITLEMENTS = 5,
+	CSSLOT_DER_ENTITLEMENTS = 7,
 
 	CSSLOT_ALTERNATE_CODEDIRECTORIES = 0x1000, /* first alternate CodeDirectory, if any */
 	CSSLOT_ALTERNATE_CODEDIRECTORY_MAX = 5,         /* max number of alternate CD slots */

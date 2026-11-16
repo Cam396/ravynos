@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 
 #include <sys/work_interval.h>
@@ -183,6 +188,20 @@ port_name_to_work_interval(mach_port_name_t     name,
 	return kr;
 }
 
+
+/* Validate the actual work-interval kobject and render-server type. */
+boolean_t
+work_interval_port_type_render_server(mach_port_name_t name)
+{
+	struct work_interval *interval = NULL;
+	if (port_name_to_work_interval(name, &interval) != KERN_SUCCESS) {
+		return FALSE;
+	}
+	boolean_t render_server = (interval->wi_create_flags & WORK_INTERVAL_TYPE_MASK) ==
+	    WORK_INTERVAL_TYPE_CA_RENDER_SERVER;
+	wi_release(interval);
+	return render_server;
+}
 
 /*
  * work_interval_port_notify

@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #include <debug.h>
 #include <mach/mach_types.h>
 #include <mach/kern_return.h>
@@ -496,6 +501,17 @@ machine_thread_function_pointers_convert_from_user(
 	user_addr_t *fptrs,
 	uint32_t count)
 {
+#if defined(ARM64_BOARD_CONFIG_BCM2837)
+    extern boolean_t ravyn_arm64e_reference_enabled(void);
+    extern uint64_t ravyn_auth_user_function_ptr(task_t, uint64_t);
+    if (ravyn_arm64e_reference_enabled() && thread_is_64bit_addr(thread)) {
+        while (count--) {
+            *fptrs = ravyn_auth_user_function_ptr(thread->task, *fptrs);
+            fptrs++;
+        }
+        return KERN_SUCCESS;
+    }
+#endif
 #if __has_feature(ptrauth_calls)
 	if (current_thread()->machine.disable_user_jop || !thread_is_64bit_addr(current_thread())) {
 		assert(thread->machine.disable_user_jop || !thread_is_64bit_addr(thread));

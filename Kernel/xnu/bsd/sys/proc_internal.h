@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995, 1997 Apple Computer, Inc. All Rights Reserved */
 /*-
  * Copyright (c) 1986, 1989, 1991, 1993
@@ -101,6 +106,16 @@ __END_DECLS
  * SL = Session Lock
  */
 struct label;
+
+/* Monterey stable process identity; not embedded into the legacy proc layout. */
+struct proc_ident {
+    uint64_t p_uniqueid;
+    pid_t p_pid;
+    int p_idversion;
+};
+
+/* Snapshot only the current process or a process with a held reference. */
+extern struct proc_ident proc_ident(proc_t p);
 
 /*
  * One structure allocated per session.
@@ -512,7 +527,8 @@ struct  proc {
 #define P_VFS_IOPOLICY_ATIME_UPDATES                    0x0002
 #define P_VFS_IOPOLICY_MATERIALIZE_DATALESS_FILES       0x0004
 #define P_VFS_IOPOLICY_STATFS_NO_DATA_VOLUME            0x0008
-#define P_VFS_IOPOLICY_VALID_MASK                       (P_VFS_IOPOLICY_ATIME_UPDATES | P_VFS_IOPOLICY_FORCE_HFS_CASE_SENSITIVITY | P_VFS_IOPOLICY_MATERIALIZE_DATALESS_FILES | P_VFS_IOPOLICY_STATFS_NO_DATA_VOLUME)
+#define P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES           0x0100
+#define P_VFS_IOPOLICY_VALID_MASK                       (P_VFS_IOPOLICY_ATIME_UPDATES | P_VFS_IOPOLICY_FORCE_HFS_CASE_SENSITIVITY | P_VFS_IOPOLICY_MATERIALIZE_DATALESS_FILES | P_VFS_IOPOLICY_STATFS_NO_DATA_VOLUME | P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES)
 
 /* process creation arguments */
 #define PROC_CREATE_FORK        0       /* independent child (running) */

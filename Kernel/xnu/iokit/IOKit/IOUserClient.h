@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*
  * Changes to this API are expected.
@@ -53,6 +58,29 @@ enum {
 
 	kIOUCForegroundOnly = 0x00000010,
 };
+
+struct IOUCFilterPolicy;
+
+#ifdef XNU_KERNEL_PRIVATE
+template <typename T> class OSSharedPtr;
+class IOUserClient;
+typedef uintptr_t io_filter_policy_t;
+enum io_filter_type_t {
+	io_filter_type_external_method       = 1,
+	io_filter_type_external_async_method = 2,
+	io_filter_type_trap                  = 3,
+};
+typedef IOReturn (*io_filter_resolver_t)(task_t task, IOUserClient *client,
+	uint32_t type, io_filter_policy_t *filterp);
+typedef IOReturn (*io_filter_applier_t)(IOUserClient *client,
+	io_filter_policy_t filter, io_filter_type_t type, uint32_t selector);
+typedef void (*io_filter_release_t)(io_filter_policy_t filter);
+struct io_filter_callbacks {
+	io_filter_resolver_t io_filter_resolver;
+	io_filter_applier_t io_filter_applier;
+	io_filter_release_t io_filter_release;
+};
+#endif /* XNU_KERNEL_PRIVATE */
 
 /*! @enum
  *   @abstract Constant to denote a variable length structure argument to IOUserClient.
@@ -189,6 +217,8 @@ protected:
 #else
 		void *iokitstatsReserved;
 #endif
+		IOLock *filterLock;
+		IOUCFilterPolicy *filterPolicies;
 	};
 
 /*! @var reserved
@@ -267,6 +297,12 @@ public:
 	    mach_vm_address_t atAddress = 0 );
 	IOReturn registerOwner(task_t task);
 	void     noMoreSenders(void);
+	static IOReturn registerFilterCallbacks(const struct io_filter_callbacks *callbacks,
+	    size_t size);
+	io_filter_policy_t filterForTask(task_t task);
+	IOReturn resolveFilterForTask(task_t task, uint32_t type);
+	IOReturn applyFilterForTask(task_t task, io_filter_type_t type,
+	    uint32_t selector);
 
 #endif /* XNU_KERNEL_PRIVATE */
 
@@ -414,6 +450,8 @@ public:
  *   @param object If the port name is valid, a reference to the object is returned. It should be released by the caller.
  *   @result A return code.
  */
+	static IOReturn copyObjectForPortNameInTask(task_t task, mach_port_name_t port_name,
+	    OSSharedPtr<OSObject>& object);
 	static IOReturn copyObjectForPortNameInTask(task_t task, mach_port_name_t port_name,
 	    OSObject **object);
 

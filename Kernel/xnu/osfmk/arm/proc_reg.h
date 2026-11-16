@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /* CMU_ENDHIST */
@@ -215,7 +220,9 @@
 #define __ARM_VFP__               4
 #define __ARM_COHERENT_CACHE__    1
 #define __ARM_DEBUG__             7
-#define __ARM64_PMAP_SUBPAGE_L1__ 1
+/* macOS arm64e assumes 47-bit pointers when stripping signed metadata.
+ * Native 16 KiB, three-level tables cover 47 bits without a subpage root. */
+#define __ARM_16K_PG__            1
 #else
 #error processor not supported
 #endif

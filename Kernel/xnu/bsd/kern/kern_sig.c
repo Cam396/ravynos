@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Copyright (c) 1982, 1986, 1989, 1991, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -129,6 +134,9 @@
 extern int thread_enable_fpe(thread_t act, int onoff);
 extern kern_return_t get_signalact(task_t, thread_t *, int);
 extern unsigned int get_useraddr(void);
+#if defined(__x86_64__)
+extern void *find_user_regs(thread_t);
+#endif
 extern boolean_t task_did_exec(task_t task);
 extern boolean_t task_is_exec_copy(task_t task);
 
@@ -1263,6 +1271,34 @@ __pthread_kill(__unused proc_t p, struct __pthread_kill_args *uap,
 	int error = 0;
 	int signum = uap->sig;
 	struct uthread *uth;
+
+#if defined(__x86_64__)
+	/* This syscall still runs in the caller's map; never dereference user frames. */
+	if (signum == SIGABRT && IS_64BIT_PROCESS(p)) {
+		x86_saved_state64_t *ss = saved_state64(find_user_regs(current_thread()));
+		if (ss != NULL) {
+			uint64_t frame = ss->rbp;
+			printf("RAVYN-ABRT-STACK pid=%d name=%s rip=0x%llx rbp=0x%llx\n",
+			    p->p_pid, p->p_comm, ss->isf.rip, frame);
+			for (int i = 0; i < 12; i++) {
+				uint64_t pair[2];
+				if (frame < ss->isf.rsp || frame >= 0x0000800000000000ULL || (frame & 7)) {
+					break;
+				}
+				int copy_error = copyin((user_addr_t)frame, pair, sizeof(pair));
+				if (copy_error) {
+					printf("RAVYN-ABRT-FRAME pid=%d index=%d copy_error=%d\n", p->p_pid, i, copy_error);
+					break;
+				}
+				printf("RAVYN-ABRT-FRAME pid=%d index=%d pc=0x%llx\n", p->p_pid, i, pair[1]);
+				if (pair[0] <= frame || pair[0] - frame > 0x100000) {
+					break;
+				}
+				frame = pair[0];
+			}
+		}
+	}
+#endif
 
 	target_act = (thread_t)port_name_to_thread(uap->thread_port,
 	    PORT_TO_THREAD_NONE);

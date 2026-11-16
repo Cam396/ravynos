@@ -21,6 +21,11 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  *
  *	File: vm/vm_shared_region.h
  *
@@ -187,7 +192,8 @@ struct vm_shared_region_slide_info {
 	mach_vm_offset_t        start;
 	mach_vm_offset_t        end;
 	uint32_t                slide;
-#if defined(HAS_APPLE_PAC)
+	boolean_t               si_dynamic;
+#if defined(HAS_APPLE_PAC) || (defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837))
 	boolean_t               si_ptrauth;
 #endif /* HAS_APPLE_PAC */
 	vm_object_t             slide_object;
@@ -198,6 +204,7 @@ struct vm_shared_region_slide_info {
 /* address space shared region descriptor */
 struct vm_shared_region {
 	uint32_t                sr_ref_count;
+	uint32_t                sr_slide;
 	queue_chain_t           sr_q;
 	void                    *sr_root_dir;
 	cpu_type_t              sr_cpu_type;
@@ -278,6 +285,18 @@ extern void vm_shared_region_undo_mappings(
 	mach_vm_offset_t sr_base_address,
 	struct shared_file_mapping_np *mappings,
 	unsigned int mappings_count);
+struct vm_shared_region_file_mappings {
+	unsigned int                    mappings_count;
+	struct shared_file_mapping_slide_np *mappings;
+	memory_object_control_t         file_control;
+	memory_object_size_t            file_size;
+	uint32_t                        slide;
+};
+extern kern_return_t vm_shared_region_map_file_batch(
+	struct vm_shared_region *shared_region,
+	unsigned int            files_count,
+	struct vm_shared_region_file_mappings *files,
+	void                    *root_dir);
 extern kern_return_t vm_shared_region_map_file(
 	struct vm_shared_region *shared_region,
 	unsigned int            mappings_count,
@@ -290,6 +309,15 @@ extern kern_return_t vm_shared_region_map_file(
 	user_addr_t             slide_size);
 extern kern_return_t vm_shared_region_sliding_valid(uint32_t slide);
 extern kern_return_t vm_shared_region_slide_sanity_check(vm_shared_region_t sr);
+extern kern_return_t vm_shared_region_slide_mapping_dynamic(
+	vm_shared_region_t      shared_region,
+	user_addr_t             slide_info_address,
+	mach_vm_size_t          slide_info_size,
+	mach_vm_offset_t        file_offset,
+	mach_vm_size_t          file_size,
+	mach_vm_offset_t        slid_mapping,
+	uint32_t                slide,
+	memory_object_control_t file_control);
 extern void* vm_shared_region_get_slide_info_entry(vm_shared_region_t sr);
 extern void vm_commpage_init(void);
 extern void vm_commpage_text_init(void);

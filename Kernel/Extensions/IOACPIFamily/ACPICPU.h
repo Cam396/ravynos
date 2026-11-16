@@ -20,6 +20,11 @@
  * This file was modified by William Kent in 2017 to support the PureDarwin
  * project. This notice is included in support of clause 2.2(b) of the License.
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #ifndef _IOKIT_APPLEI386CPU_H
 #define _IOKIT_APPLEI386CPU_H
@@ -34,9 +39,11 @@ class ACPICPU : public IOCPU {
 
 private:
         uint32_t index;
+	uint32_t apicId;
 
 	IOCPUInterruptController *cpuIC;
 	bool startCommonCompleted;
+	bool cpuInterruptEnabled;
 
 public:
 	virtual IOService *probe(IOService *provider, SInt32 *score) APPLE_KEXT_OVERRIDE;
@@ -47,6 +54,10 @@ public:
 	virtual void haltCPU(void) APPLE_KEXT_OVERRIDE;
 	virtual const OSSymbol *getCPUName(void) APPLE_KEXT_OVERRIDE;
 	bool startCommon(void);
+	uint32_t getAPICID(void) const { return apicId; }
+	void assignLogicalNumber(uint32_t number) { setCPUNumber(number); }
+	void prepareInterrupts(void);
+	bool registerMachineCPU(bool start);
 };
 
 class ACPICPUInterruptController : public IOCPUInterruptController {

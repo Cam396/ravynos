@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -745,6 +750,9 @@ typedef natural_t mach_msg_type_number_t;
 	(((x) >= MACH_MSG_TYPE_MOVE_RECEIVE) &&         \
 	 ((x) <= MACH_MSG_TYPE_MOVE_SEND_ONCE))
 
+typedef int mach_msg_filter_id;
+#define MACH_MSG_FILTER_POLICY_ALLOW ((mach_msg_filter_id)0)
+
 typedef integer_t mach_msg_option_t;
 
 #define MACH_MSG_OPTION_NONE    0x00000000
@@ -760,6 +768,7 @@ typedef integer_t mach_msg_option_t;
 #define MACH_SEND_INTERRUPT     0x00000040      /* don't restart interrupted sends */
 #define MACH_SEND_NOTIFY        0x00000080      /* arm send-possible notify */
 #define MACH_SEND_ALWAYS        0x00010000      /* ignore qlimits - kernel only */
+#define MACH_SEND_FILTER_NONFATAL 0x00010000    /* message filter rejection is nonfatal (user trap only) */
 #define MACH_SEND_TRAILER       0x00020000      /* sender-provided trailer */
 #define MACH_SEND_NOIMPORTANCE  0x00040000      /* msg won't carry importance */
 #define MACH_SEND_NODENAP       MACH_SEND_NOIMPORTANCE
@@ -985,6 +994,8 @@ typedef kern_return_t mach_msg_return_t;
 /* compatibility: no longer a returned error */
 #define MACH_SEND_NO_GRANT_DEST         0x10000016
 /* The destination port doesn't accept ports in body */
+#define MACH_SEND_MSG_FILTERED           0x10000017
+/* Message send was rejected by a message filter */
 
 #define MACH_RCV_IN_PROGRESS            0x10004001
 /* Thread is waiting for receive.  (Internal use only.) */

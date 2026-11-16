@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
 /*
  * Mach Operating System
@@ -777,6 +782,11 @@ activate_exec_state(task_t task, proc_t p, thread_t thread, load_result_t *resul
 		OSBitAndAtomic(~((uint32_t)P_LP64), &p->p_flag);
 	}
 	task_set_mach_header_address(task, result->mach_header);
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+    extern void ravyn_user_pauth_exec(task_t);
+    ravyn_user_pauth_exec(task);
+#endif
+
 
 	ret = thread_state_initialize(thread);
 	if (ret != KERN_SUCCESS) {
@@ -1100,7 +1110,7 @@ grade:
 	 */
 	int cpu_subtype;
 	cpu_subtype = 0; /* all cpu_subtypes use the same shared region */
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || (defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837))
 	if (cpu_type() == CPU_TYPE_ARM64 &&
 	    (p->p_cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E) {
 		assertf(p->p_cputype == CPU_TYPE_ARM64,
@@ -1847,6 +1857,38 @@ exec_port_actions_destroy(struct exec_port_actions *port_actions)
  *              EINVAL			Failure
  *              ENOTSUP			Illegal posix_spawn attr flag was set
  */
+/* Bounded, opt-in diagnostics: observe spawn failure without touching PID1. */
+static boolean_t
+ravyn_spawntrace_enabled(void)
+{
+    int enabled = 0;
+    return PE_parse_boot_argn("ravyn_spawntrace", &enabled, sizeof(enabled)) && enabled;
+}
+
+static void
+ravyn_spawntrace(proc_t parent, user_addr_t user_path, int error, int line,
+    const struct image_params *imgp, user_size_t attr_size)
+{
+    static volatile uint32_t count;
+    if (!error || !ravyn_spawntrace_enabled() || OSIncrementAtomic(&count) >= 96) {
+        return;
+    }
+    char path[160] = {0};
+    size_t copied = 0;
+    if (copyinstr(user_path, path, sizeof(path), &copied)) {
+        strlcpy(path, "<unreadable-or-long>", sizeof(path));
+    }
+    kprintf("RAVYN-SPAWN-FAIL parent=%d name=%s error=%d line=%d path=%s attr_size=%llu\n",
+        parent->p_pid, parent->p_comm, error, line, path, (unsigned long long)attr_size);
+    if (imgp && imgp->ip_px_sa) {
+        const struct _posix_spawnattr *sa = imgp->ip_px_sa;
+        kprintf("RAVYN-SPAWN-ATTR flags=0x%x apptype=0x%x qos=%llu role=0x%llx thread_limit=%d max_addr=0x%llx\n",
+            (unsigned short)sa->psa_flags, sa->psa_apptype, (unsigned long long)sa->psa_qos_clamp,
+            (unsigned long long)sa->psa_darwin_role, sa->psa_thread_limit,
+            (unsigned long long)sa->psa_max_addr);
+    }
+}
+
 static errno_t
 exec_handle_port_actions(struct image_params *imgp,
     struct exec_port_actions *actions)
@@ -1860,7 +1902,8 @@ exec_handle_port_actions(struct image_params *imgp,
 	ipc_port_t port = NULL;
 	errno_t ret = 0;
 	int i, portwatch_i = 0, registered_i = 0;
-	kern_return_t kr;
+	kern_return_t kr = KERN_SUCCESS;
+	int ravyn_port_failure_line = 0;
 	boolean_t task_has_watchport_boost = task_has_watchports(current_task());
 	boolean_t in_exec = (imgp->ip_flags & IMGPF_EXEC);
 	boolean_t suid_cred_specified = FALSE;
@@ -1877,13 +1920,13 @@ exec_handle_port_actions(struct image_params *imgp,
 			break;
 		case PSPA_IMP_WATCHPORTS:
 			if (++actions->portwatch_count > TASK_MAX_WATCHPORT_COUNT) {
-				ret = EINVAL;
+				ravyn_port_failure_line = __LINE__; ret = EINVAL;
 				goto done;
 			}
 			break;
 		case PSPA_REGISTERED_PORTS:
 			if (++actions->registered_count > TASK_PORT_REGISTER_MAX) {
-				ret = EINVAL;
+				ravyn_port_failure_line = __LINE__; ret = EINVAL;
 				goto done;
 			}
 			break;
@@ -1891,21 +1934,21 @@ exec_handle_port_actions(struct image_params *imgp,
 		case PSPA_SUID_CRED:
 			/* Only a single suid credential can be specified. */
 			if (suid_cred_specified) {
-				ret = EINVAL;
+				ravyn_port_failure_line = __LINE__; ret = EINVAL;
 				goto done;
 			}
 			suid_cred_specified = TRUE;
 			break;
 
 		default:
-			ret = EINVAL;
+			ravyn_port_failure_line = __LINE__; ret = EINVAL;
 			goto done;
 		}
 	}
 
 	if (actions->portwatch_count) {
 		if (in_exec && task_has_watchport_boost) {
-			ret = EINVAL;
+			ravyn_port_failure_line = __LINE__; ret = EINVAL;
 			goto done;
 		}
 		actions->portwatch_array =
@@ -1938,7 +1981,7 @@ exec_handle_port_actions(struct image_params *imgp,
 			    (ipc_object_t *) &port, 0, NULL, IPC_KMSG_FLAGS_ALLOW_IMMOVABLE_SEND);
 
 			if (kr != KERN_SUCCESS) {
-				ret = EINVAL;
+				ravyn_port_failure_line = __LINE__; ret = EINVAL;
 				goto done;
 			}
 		} else {
@@ -1951,7 +1994,7 @@ exec_handle_port_actions(struct image_params *imgp,
 			kr = task_set_special_port(task, act->which, port);
 
 			if (kr != KERN_SUCCESS) {
-				ret = EINVAL;
+				ravyn_port_failure_line = __LINE__; ret = EINVAL;
 			}
 			break;
 
@@ -1959,7 +2002,7 @@ exec_handle_port_actions(struct image_params *imgp,
 			kr = task_set_exception_ports(task, act->mask, port,
 			    act->behavior, act->flavor);
 			if (kr != KERN_SUCCESS) {
-				ret = EINVAL;
+				ravyn_port_failure_line = __LINE__; ret = EINVAL;
 			}
 			break;
 #if CONFIG_AUDIT
@@ -1990,7 +2033,7 @@ exec_handle_port_actions(struct image_params *imgp,
 			break;
 
 		default:
-			ret = EINVAL;
+			ravyn_port_failure_line = __LINE__; ret = EINVAL;
 			break;
 		}
 
@@ -2002,6 +2045,14 @@ exec_handle_port_actions(struct image_params *imgp,
 	}
 
 done:
+    if (ret && act && ravyn_spawntrace_enabled()) {
+        static volatile uint32_t port_count;
+        if (OSIncrementAtomic(&port_count) < 96) {
+            kprintf("RAVYN-SPAWN-PORT error=%d line=%d kr=%u type=%d which=%d mask=0x%x behavior=0x%x flavor=%d port=0x%x\n",
+                ret, ravyn_port_failure_line, kr, act->port_type, act->which,
+                act->mask, act->behavior, act->flavor, act->new_port);
+        }
+    }
 	if (0 != ret) {
 		DTRACE_PROC1(spawn__port__failure, mach_port_name_t, act->new_port);
 	}
@@ -2745,7 +2796,8 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 	int error, sig;
 	int is_64 = IS_64BIT_PROCESS(p);
 	struct vfs_context context;
-	struct user__posix_spawn_args_desc px_args;
+	struct user__posix_spawn_args_desc px_args = {0};
+	int ravyn_spawn_failure_line = 0;
 	struct _posix_spawnattr px_sa;
 	_posix_spawn_file_actions_t px_sfap = NULL;
 	_posix_spawn_port_actions_t px_spap = NULL;
@@ -2772,7 +2824,7 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 	imgp = (struct image_params *) bufp;
 	if (bufp == NULL) {
 		error = ENOMEM;
-		goto bad;
+		{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 	}
 	vap = (struct vnode_attr *) (bufp + sizeof(*imgp));
 	origvap = (struct vnode_attr *) (bufp + sizeof(*imgp) + sizeof(*vap));
@@ -2820,7 +2872,7 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			px_args.posix_cred_info = CAST_USER_ADDR_T(px_args32.posix_cred_info);
 		}
 		if (error) {
-			goto bad;
+			{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 		}
 
 		if (px_args.attr_size != 0) {
@@ -2831,7 +2883,7 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			 */
 
 			if ((error = copyin(px_args.attrp, &px_sa, px_sa_offset)) != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 
 			bzero((void *)((unsigned long) &px_sa + px_sa_offset), sizeof(px_sa) - px_sa_offset );
@@ -2845,25 +2897,25 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			if (px_args.file_actions_size < PSF_ACTIONS_SIZE(1) ||
 			    maxfa_size == 0 || px_args.file_actions_size > maxfa_size) {
 				error = EINVAL;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 			MALLOC(px_sfap, _posix_spawn_file_actions_t, px_args.file_actions_size, M_TEMP, M_WAITOK);
 			if (px_sfap == NULL) {
 				error = ENOMEM;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 			imgp->ip_px_sfa = px_sfap;
 
 			if ((error = copyin(px_args.file_actions, px_sfap,
 			    px_args.file_actions_size)) != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 
 			/* Verify that the action count matches the struct size */
 			size_t psfsize = PSF_ACTIONS_SIZE(px_sfap->psfa_act_count);
 			if (psfsize == 0 || psfsize != px_args.file_actions_size) {
 				error = EINVAL;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 		}
 		if (px_args.port_actions_size != 0) {
@@ -2871,27 +2923,27 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			if (px_args.port_actions_size < PS_PORT_ACTIONS_SIZE(1) ||
 			    px_args.port_actions_size > PAGE_SIZE) {
 				error = EINVAL;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 
 			MALLOC(px_spap, _posix_spawn_port_actions_t,
 			    px_args.port_actions_size, M_TEMP, M_WAITOK);
 			if (px_spap == NULL) {
 				error = ENOMEM;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 			imgp->ip_px_spa = px_spap;
 
 			if ((error = copyin(px_args.port_actions, px_spap,
 			    px_args.port_actions_size)) != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 
 			/* Verify that the action count matches the struct size */
 			size_t pasize = PS_PORT_ACTIONS_SIZE(px_spap->pspa_count);
 			if (pasize == 0 || pasize != px_args.port_actions_size) {
 				error = EINVAL;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 		}
 #if CONFIG_PERSONAS
@@ -2900,22 +2952,22 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			/* for now, we need the exact same struct in user space */
 			if (px_args.persona_info_size != sizeof(*px_persona)) {
 				error = ERANGE;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 
 			MALLOC(px_persona, struct _posix_spawn_persona_info *, px_args.persona_info_size, M_TEMP, M_WAITOK | M_ZERO);
 			if (px_persona == NULL) {
 				error = ENOMEM;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 			imgp->ip_px_persona = px_persona;
 
 			if ((error = copyin(px_args.persona_info, px_persona,
 			    px_args.persona_info_size)) != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 			if ((error = spawn_validate_persona(px_persona)) != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 		}
 #endif
@@ -2924,38 +2976,38 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			/* for now, we need the exact same struct in user space */
 			if (px_args.posix_cred_info_size != sizeof(*px_pcred_info)) {
 				error = ERANGE;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 
 			if (!kauth_cred_issuser(kauth_cred_get())) {
 				error = EPERM;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 
 			MALLOC(px_pcred_info, struct _posix_spawn_posix_cred_info *,
 			    px_args.posix_cred_info_size, M_TEMP, M_WAITOK | M_ZERO);
 			if (px_pcred_info == NULL) {
 				error = ENOMEM;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 			imgp->ip_px_pcred_info = px_pcred_info;
 
 			if ((error = copyin(px_args.posix_cred_info, px_pcred_info,
 			    px_args.posix_cred_info_size)) != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 
 			if (px_pcred_info->pspci_flags & POSIX_SPAWN_POSIX_CRED_GROUPS) {
 				if (px_pcred_info->pspci_ngroups > NGROUPS_MAX) {
 					error = EINVAL;
-					goto bad;
+					{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 				}
 			}
 		}
 #if CONFIG_MACF
 		if (px_args.mac_extensions_size != 0) {
 			if ((error = spawn_copyin_macpolicyinfo(&px_args, (_posix_spawn_mac_policy_extensions_t *)&imgp->ip_px_smpx)) != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 		}
 #endif /* CONFIG_MACF */
@@ -2971,13 +3023,13 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 	 */
 	if (uthread->uu_flag & UT_VFORK) {
 		error = EINVAL;
-		goto bad;
+		{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 	}
 
 	if (imgp->ip_px_sa != NULL) {
 		struct _posix_spawnattr *psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
 		if ((error = exec_validate_spawnattr_policy(psa->psa_apptype)) != 0) {
-			goto bad;
+			{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 		}
 	}
 
@@ -3009,7 +3061,7 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 		error = copyin(px_args.coal_info,
 		    &coal_info, px_args.coal_info_size);
 		if (error != 0) {
-			goto bad;
+			{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 		}
 
 		ncoals = 0;
@@ -3027,7 +3079,7 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 					    p->p_pid, i);
 					spawn_coalitions_release_all(coal);
 					error = EPERM;
-					goto bad;
+					{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 				}
 
 				coal_dbg("searching for coalition id:%llu", cid);
@@ -3046,13 +3098,13 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 					 */
 					spawn_coalitions_release_all(coal);
 					error = ESRCH;
-					goto bad;
+					{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 				}
 				if (coalition_type(coal[i]) != i) {
 					coal_dbg("coalition with id:%lld is not of type:%d"
 					    " (it's type:%d)", cid, i, coalition_type(coal[i]));
 					error = ESRCH;
-					goto bad;
+					{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 				}
 				coal_role[i] = coal_info.psci_info[i].psci_role;
 				ncoals++;
@@ -3071,7 +3123,7 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			if (coal[COALITION_TYPE_RESOURCE] == COALITION_NULL) {
 				spawn_coalitions_release_all(coal);
 				error = EINVAL;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 		}
 do_fork1:
@@ -3116,7 +3168,7 @@ do_fork1:
 		spawn_coalitions_release_all(coal);
 #endif /* CONFIG_COALITIONS */
 		if (error != 0) {
-			goto bad;
+			{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 		}
 		imgp->ip_flags |= IMGPF_SPAWN;  /* spawn w/o exec */
 		spawn_no_exec = TRUE;           /* used in later tests */
@@ -3156,7 +3208,7 @@ do_fork1:
 		/* task and thread ref returned by fork_create_child */
 		if (imgp->ip_new_thread == NULL) {
 			error = ENOMEM;
-			goto bad;
+			{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 		}
 
 		new_task = get_threadtask(imgp->ip_new_thread);
@@ -3206,7 +3258,7 @@ do_fork1:
 		uthread->uu_ar = save_uu_ar;
 #endif
 		if (error != 0) {
-			goto bad;
+			{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 		}
 	}
 
@@ -3226,7 +3278,7 @@ do_fork1:
 		uthread->uu_ar = save_uu_ar;
 #endif
 		if (error != 0) {
-			goto bad;
+			{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 		}
 	}
 
@@ -3256,12 +3308,12 @@ do_fork1:
 		if (imgp->ip_px_pcred_info) {
 			if (!spawn_no_exec) {
 				error = ENOTSUP;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 
 			error = spawn_posix_cred_adopt(p, imgp->ip_px_pcred_info);
 			if (error != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 		}
 
@@ -3269,7 +3321,7 @@ do_fork1:
 		if (imgp->ip_px_persona != NULL) {
 			if (!spawn_no_exec) {
 				error = ENOTSUP;
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 
 			/*
@@ -3282,7 +3334,7 @@ do_fork1:
 			 */
 			error = spawn_persona_adopt(p, imgp->ip_px_persona);
 			if (error != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 		}
 #endif /* CONFIG_PERSONAS */
@@ -3347,7 +3399,7 @@ do_fork1:
 	if (uap->mac_p != USER_ADDR_NULL) {
 		error = mac_execve_enter(uap->mac_p, imgp);
 		if (error) {
-			goto bad;
+			{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 		}
 	}
 #endif
@@ -3402,14 +3454,14 @@ do_fork1:
 			 * because there are no pointer arguments.
 			 */
 			if ((error = setpgid(p, &spga, ival)) != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 		}
 
 		if (px_sa.psa_flags & POSIX_SPAWN_SETSID) {
 			error = setsid_internal(p);
 			if (error != 0) {
-				goto bad;
+				{ ravyn_spawn_failure_line = __LINE__; goto bad; }
 			}
 		}
 
@@ -3481,6 +3533,7 @@ do_fork1:
 	}
 
 bad:
+	ravyn_spawntrace(ap, uap->path, error, ravyn_spawn_failure_line, imgp, px_args.attr_size);
 
 	if (error == 0) {
 		/* reset delay idle sleep status if set */
@@ -3662,6 +3715,7 @@ bad:
 
 		error = exec_handle_spawnattr_policy(p, imgp->ip_new_thread, psa->psa_apptype, psa->psa_qos_clamp,
 		    psa->psa_darwin_role, &port_actions);
+		ravyn_spawntrace(ap, uap->path, error, __LINE__, imgp, px_args.attr_size);
 	}
 
 	/* Transfer the turnstile watchport boost to new task if in exec */
@@ -5260,6 +5314,7 @@ exec_check_permissions(struct image_params *imgp)
 	VATTR_WANTED(vap, va_fsid64);
 	VATTR_WANTED(vap, va_fileid);
 	VATTR_WANTED(vap, va_data_size);
+	VATTR_WANTED(vap, va_flags);
 	if ((error = vnode_getattr(vp, vap, imgp->ip_vfs_context)) != 0) {
 		return error;
 	}
@@ -6295,6 +6350,33 @@ __EXEC_WAITING_ON_TASKGATED_CODE_SIGNATURE_UPCALL__(mach_port_t task_access_port
 	return find_code_signature(task_access_port, new_pid);
 }
 
+/*
+ * taskgated must start before it can service task-access signature RPCs.
+ * In the explicit Ravyn compatibility boot, allow only the SF_RESTRICTED
+ * taskgated executable to make that first transition without asking the
+ * daemon to validate itself.
+ */
+static int
+ravyn_taskgated_bootstrap_exempt(proc_t p, struct image_params *imgp)
+{
+	int enabled = 0;
+
+	if (!PE_parse_boot_argn("ravyn_taskgated_bootstrap", &enabled, sizeof(enabled)) ||
+	    enabled != 1 || p == NULL || imgp == NULL || imgp->ip_vp == NULL ||
+	    imgp->ip_vattr == NULL) {
+		return 0;
+	}
+	if (current_proc() != p || strcmp(p->p_comm, "taskgated") != 0 ||
+	    imgp->ip_vp->v_name == NULL ||
+	    strcmp(imgp->ip_vp->v_name, "taskgated") != 0) {
+		return 0;
+	}
+	if (!VATTR_IS_SUPPORTED(imgp->ip_vattr, va_flags)) {
+		return 0;
+	}
+	return (imgp->ip_vattr->va_flags & SF_RESTRICTED) != 0;
+}
+
 static int
 check_for_signature(proc_t p, struct image_params *imgp)
 {
@@ -6374,6 +6456,12 @@ check_for_signature(proc_t p, struct image_params *imgp)
 	 * rpc call, taskgated died, mig server died etc.).
 	 */
 
+	if (ravyn_taskgated_bootstrap_exempt(p, imgp)) {
+		printf("RAVYN-CODESIGN: allowed restricted taskgated bootstrap pid=%d\n",
+		    p->p_pid);
+		error = 0;
+		goto done;
+	}
 	kr = __EXEC_WAITING_ON_TASKGATED_CODE_SIGNATURE_UPCALL__(port, p->p_pid);
 	switch (kr) {
 	case KERN_SUCCESS:
@@ -6610,3 +6698,20 @@ exec_prefault_data(proc_t p __unused, struct image_params *imgp, load_result_t *
 		}
 	}
 }
+
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+/*
+ * Match the original ARM64 exec policy. A plain arm64 task uses unsigned
+ * code/data pointers even when it loads the arm64e system libraries.
+ */
+boolean_t
+ravyn_task_uses_user_jop(task_t task)
+{
+    proc_t process = get_bsdtask_info(task);
+    if (process == PROC_NULL || process->p_cputype != CPU_TYPE_ARM64)
+        return TRUE;
+    cpu_subtype_t subtype = process->p_cpusubtype;
+    return (subtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E &&
+        CPU_SUBTYPE_ARM64_PTR_AUTH_VERSION(subtype) == 0;
+}
+#endif

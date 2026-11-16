@@ -25,14 +25,20 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #ifndef _MACH_COALITION_H_
 #define _MACH_COALITION_H_
 
 /* code shared by userspace and xnu */
 
-#define COALITION_CREATE_FLAGS_MASK       ((uint32_t)0xFF1)
+#define COALITION_CREATE_FLAGS_MASK       ((uint32_t)0xFF3)
 #define COALITION_CREATE_FLAGS_PRIVILEGED ((uint32_t)0x01)
+#define COALITION_CREATE_FLAGS_EFFICIENT  ((uint32_t)0x02)
 
 #define COALITION_CREATE_FLAGS_TYPE_MASK  ((uint32_t)0xF0)
 #define COALITION_CREATE_FLAGS_TYPE_SHIFT (4)

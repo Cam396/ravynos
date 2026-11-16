@@ -19,6 +19,11 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 //#define IOFB_DISABLEFB 1
 
 #include <IOKit/IOLib.h>
@@ -509,6 +514,8 @@ enum
 
 struct IOFramebufferPrivate
 {
+    IOInterruptEventSource *fCloseWorkES;
+    bool fClosePending;
     IOFBController *            controller;
     IODisplay *					display;
     IOFramebuffer *				nextMirror;
@@ -1366,6 +1373,7 @@ bool IOFBController::init(IOFramebuffer *fb)
         OSSafeReleaseNULL(depPropObj);
     fDependentID = static_cast<OSNumber*>(depPropObj);
 
+#if !defined(RAVYN_ARM64_STATIC_IOGRAPHICS)
     IOService *service = fb;
     while ((service = service->getProvider()))
         if (OSDynamicCast(IOPCIDevice, service))
@@ -1412,6 +1420,13 @@ bool IOFBController::init(IOFramebuffer *fb)
     }
     else
         fName = "FB??";
+#else
+    /* The Pi GOP framebuffer is an IOResources child, not a PCI display. */
+    fDevice = 0;
+    fIntegrated = false;
+    fExternal = false;
+    fName = "FB??";
+#endif
 
 #if SINGLE_THREAD
     fWl = gIOFBSystemWorkLoop;
@@ -3886,6 +3901,7 @@ IOReturn IOFramebuffer::waitQuietController()
 {
     IOFB_START(waitQuietController,0,0,0);
     IOReturn status = kIOReturnOffline;
+#if !defined(RAVYN_ARM64_STATIC_IOGRAPHICS)
     IOService *pci = this;
     const uint64_t  timeout = 15ULL;
     uint64_t    pciRegID = 0;
@@ -3924,6 +3940,11 @@ IOReturn IOFramebuffer::waitQuietController()
 
     status = kIOReturnSuccess;
 
+#else
+    /* With no PCI anchor, an attached GOP controller is already quiet. */
+    if (isInactive()) goto done;
+    status = kIOReturnSuccess;
+#endif
 done:
     IOG_KTRACE(DBG_IOG_WAIT_QUIET, DBG_FUNC_NONE,
                0, pciRegID,
@@ -4472,9 +4493,7 @@ do {                                                                           \
         if ((unsigned) -1 != i) gStartedFramebuffers->removeObject(i);
     }
 
-#if 0
     RELEASE_EVENT_SOURCE(gIOFBSystemWorkLoop, __private->fCloseWorkES);
-#endif
 
     if (this == gIOFBConsoleFramebuffer) {
         gIOFBConsoleFramebuffer = NULL;
@@ -4569,6 +4588,11 @@ IOReturn IOFramebuffer::probeAccelerator()
         __private->controller->setState(kIOFBAccelProbed);
     }
 
+#if defined(RAVYN_ARM64_STATIC_IOGRAPHICS)
+    /* GOP exposes scanout only; there is no PCI accelerator to probe. */
+    IOFB_END(probeAccelerator,kIOReturnNotFound,__LINE__,0);
+    return kIOReturnNotFound;
+#else
     IOService *pci = this;
     while ((pci = pci->getProvider()))
     {
@@ -4597,6 +4621,7 @@ IOReturn IOFramebuffer::probeAccelerator()
 
     IOFB_END(probeAccelerator,status,0,0);
     return status;
+#endif
 }
 
 
@@ -4606,8 +4631,14 @@ void IOFramebuffer::initialize()
 	OSDictionary  *     matching;
 
 	gIOFBServerInit      = true;
+#if defined(__arm64__)
+	/* ARM boot_args exposes bootFlags, not the x86 black-boot flags. */
+	gIOFBBlackBoot       = false;
+	gIOFBBlackBootTheme  = false;
+#else
 	gIOFBBlackBoot       = (0 != (kBootArgsFlagBlack & ((boot_args *) PE_state.bootArgs)->flags));
 	gIOFBBlackBootTheme  = (0 != (kBootArgsFlagBlackBg & ((boot_args *) PE_state.bootArgs)->flags));
+#endif
 	if (gIOFBBlackBoot || gIOFBBlackBootTheme) gIOFBGrayValue = 0;
     gIOFBVerboseBoot     = PE_parse_boot_argn("-v", NULL,0);
 
@@ -4712,10 +4743,15 @@ bool IOFramebuffer::attach(IOService *provider)
 {
     IOFB_START(attach,0,0,0);
     bool foundAGDC = false;
+#if defined(RAVYN_ARM64_STATIC_IOGRAPHICS)
+    bool tunnelled = false;
+#else
     bool tunnelled = (NULL != provider->getProperty(kIOPCITunnelledKey, gIOServicePlane,
             kIORegistryIterateRecursively | kIORegistryIterateParents));
+#endif
     bool status = false;
 
+#if !defined(RAVYN_ARM64_STATIC_IOGRAPHICS)
     if (tunnelled) do {
         IOService *pci = provider;
         while ((NULL == OSDynamicCast(IOPCIDevice, pci)) &&
@@ -4739,6 +4775,7 @@ bool IOFramebuffer::attach(IOService *provider)
         }
         OSSafeReleaseNULL(descendantIter);
     } while (false);
+#endif
 
     if (!tunnelled || foundAGDC) {
         status = super::attach(provider);
@@ -4792,13 +4829,11 @@ bool IOFramebuffer::start( IOService * provider )
         }
         bzero(serverMsg, sizeof(mach_msg_header_t));
 
-#if 0
         __private->fCloseWorkES = IOInterruptEventSource::interruptEventSource(this,
             OSMemberFunctionCast(IOInterruptEventSource::Action, this,
                 &IOFramebuffer::closeWork));
         if (!static_cast<bool>(__private->fCloseWorkES)) return false;
         gIOFBSystemWorkLoop->addEventSource(__private->fCloseWorkES);
-#endif
 
         // Grab the gate before we try to find a controller
         SYSGATEGUARD(sysgated);
@@ -6222,7 +6257,12 @@ void IOFramebuffer::saveFramebuffer(void)
 #if RLOG
 				kern_return_t kr = 
 #endif
-				vm_map_wire( IOPageableMapForAddress( (vm_address_t) __private->saveFramebuffer ),
+#if defined(XNU_KERNEL_PRIVATE)
+                vm_map_wire_external(
+#else
+                vm_map_wire(
+#endif
+                             IOPageableMapForAddress( (vm_address_t) __private->saveFramebuffer ),
 							 (vm_address_t) __private->saveFramebuffer,
 							 ((vm_address_t) __private->saveFramebuffer) + __private->saveLength,
 							 VM_PROT_READ | VM_PROT_WRITE, FALSE );
@@ -10165,13 +10205,11 @@ void IOFramebuffer::extClose(void)
     FBASSERTGATED(this);
 
     // Start closeWork() on sys WL and sleep (with gate open) until it finishes.
-#if 0
     __private->fClosePending = true;
     do {
         __private->fCloseWorkES->interruptOccurred(0, 0, 0);
         FBWL(this)->sleepGate(&__private->fClosePending, THREAD_UNINT);
     } while (__private->fClosePending);
-#endif
 
     IOG_KTRACE(DBG_IOG_FB_EXT_CLOSE, DBG_FUNC_END,
                0, __private->regID, 0, 0, 0, 0, 0, 0);
@@ -10182,8 +10220,10 @@ void IOFramebuffer::closeWork(IOInterruptEventSource *, int)
     SYSASSERTGATED(); // Scheduled on sys WL by extClose.
     FBGATEGUARD(ctrlgated, this);
     close();
-    //__private->fClosePending = false;
-    //FBWL(this)->wakeupGate(&__private->fClosePending, kManyThreadWakeup);
+    __private->fClosePending = false;
+    FBWL(this)->wakeupGate(&__private->fClosePending, kManyThreadWakeup);
+    IOLog("RAVYN-IOFB-CLOSE %s owner_cleared=%d\n", thisName,
+        fServerConnect == NULL);
 }
 
 /*!

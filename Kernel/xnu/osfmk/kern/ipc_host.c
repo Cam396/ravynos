@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -572,6 +577,7 @@ host_set_exception_ports(
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
 		case EXCEPTION_STATE_IDENTITY:
+		case EXCEPTION_IDENTITY_PROTECTED:
 			break;
 		default:
 			return KERN_INVALID_ARGUMENT;
@@ -586,6 +592,12 @@ host_set_exception_ports(
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+    if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED) {
+        if (!(new_behavior & MACH_EXCEPTION_CODES)) {
+            return KERN_INVALID_ARGUMENT;
+        }
+    }
 
 #if CONFIG_MACF
 	if (mac_task_check_set_host_exception_ports(current_task(), exception_mask) != 0) {
@@ -768,10 +780,11 @@ host_swap_exception_ports(
 	}
 
 	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
+		switch (new_behavior & ~MACH_EXCEPTION_MASK) {
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
 		case EXCEPTION_STATE_IDENTITY:
+		case EXCEPTION_IDENTITY_PROTECTED:
 			break;
 		default:
 			return KERN_INVALID_ARGUMENT;
@@ -781,6 +794,12 @@ host_swap_exception_ports(
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+    if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED) {
+        if (!(new_behavior & MACH_EXCEPTION_CODES)) {
+            return KERN_INVALID_ARGUMENT;
+        }
+    }
 
 #if CONFIG_MACF
 	if (mac_task_check_set_host_exception_ports(current_task(), exception_mask) != 0) {

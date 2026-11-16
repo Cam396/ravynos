@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
 /*-
  * Copyright (c) 1982, 1986, 1989, 1993
@@ -431,6 +436,23 @@ sysctl_handle_kern_threadname(  __unused struct sysctl_oid *oidp, __unused void 
 }
 
 SYSCTL_PROC(_kern, KERN_THREADNAME, threadname, CTLFLAG_ANYBODY | CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, sysctl_handle_kern_threadname, "A", "");
+
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837) && (DEVELOPMENT || DEBUG)
+extern int ravyn_kernel_pauth_status(void);
+
+static int
+sysctl_ravyn_kernel_pauth SYSCTL_HANDLER_ARGS
+{
+	int correct = ravyn_kernel_pauth_status();
+
+	if (correct < 0) {
+		return ENOENT;
+	}
+	return sysctl_handle_int(oidp, &correct, 0, req);
+}
+SYSCTL_PROC(_kern, OID_AUTO, ravyn_kernel_pauth, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED |
+    CTLFLAG_MASKED, 0, 0, sysctl_ravyn_kernel_pauth, "I", "Kernel PAC state matches the boot-local keys");
+#endif
 
 #define BSD_HOST 1
 STATIC int
@@ -1966,6 +1988,26 @@ SYSCTL_PROC(_kern, OID_AUTO, kernelcacheuuid,
     CTLFLAG_RD | CTLFLAG_KERN | CTLTYPE_STRING | CTLFLAG_LOCKED,
     kernelcache_uuid_string, sizeof(kernelcache_uuid_string),
     sysctl_kernelcacheuuid, "A", "");
+
+#if defined(__i386__) || defined(__x86_64__)
+/*
+ * Monterey's watchdogd tolerates a missing virtual watchdog service when it
+ * can identify a hypervisor. Report the existing CPUID VMM bit through the
+ * same read-only sysctl exposed by newer XNU.
+ */
+STATIC int
+sysctl_hv_vmm_present(__unused struct sysctl_oid *oidp,
+    __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int hv_vmm_present = (cpuid_features() & CPUID_FEATURE_VMM) ? 1 : 0;
+
+	return SYSCTL_OUT(req, &hv_vmm_present, sizeof(hv_vmm_present));
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, hv_vmm_present,
+    CTLTYPE_INT | CTLFLAG_ANYBODY | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    0, 0, sysctl_hv_vmm_present, "I", "");
+#endif
 
 SYSCTL_INT(_kern, KERN_MAXFILES, maxfiles,
     CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,

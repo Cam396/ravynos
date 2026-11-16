@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -127,6 +132,10 @@ extern ipc_port_t retrieve_thread_self_fast(
 extern task_name_t convert_port_to_task_name(
 	ipc_port_t      port);
 
+/* READ conversion accepts CONTROL or READ; never used by control APIs. */
+extern task_read_t convert_port_to_task_read(ipc_port_t port);
+extern vm_map_t convert_port_to_map_read(ipc_port_t port);
+
 /* Convert from a port to a task inspect */
 extern task_inspect_t convert_port_to_task_inspect(
 	ipc_port_t      port);
@@ -142,6 +151,8 @@ convert_port_to_task_with_exec_token(
 
 extern task_t port_name_to_task(
 	mach_port_name_t name);
+
+extern task_name_t port_name_to_task_name(mach_port_name_t name);
 
 extern task_t port_name_to_task_inspect(
 	mach_port_name_t name);
@@ -174,6 +185,8 @@ extern thread_t convert_port_to_thread(
 /* Convert from a port to a thread inspect */
 extern thread_inspect_t convert_port_to_thread_inspect(
 	ipc_port_t              port);
+extern thread_read_t convert_port_to_thread_read(ipc_port_t port);
+extern ipc_port_t convert_thread_read_to_port(thread_read_t thread);
 
 __options_decl(port_to_thread_options_t, uint32_t, {
 	PORT_TO_THREAD_NONE               = 0x0000,
@@ -193,3 +206,5 @@ extern void space_inspect_deallocate(
 	ipc_space_inspect_t     space);
 
 #endif  /* _KERN_IPC_TT_H_ */
+
+#include <kern/task_ident.h>

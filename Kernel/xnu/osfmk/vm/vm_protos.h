@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #ifdef  XNU_KERNEL_PRIVATE
 
@@ -73,6 +78,8 @@ extern mach_port_name_t ipc_port_copyout_send(
 	ipc_space_t     space);
 extern task_t port_name_to_task(
 	mach_port_name_t name);
+extern task_name_t port_name_to_task_name(mach_port_name_t name);
+
 extern task_t port_name_to_task_inspect(
 	mach_port_name_t name);
 extern void ipc_port_release_send(
@@ -517,6 +524,8 @@ extern kern_return_t mach_memory_entry_purgable_control(
 	ipc_port_t      entry_port,
 	vm_purgable_t   control,
 	int             *state);
+
+extern kern_return_t mach_memory_entry_phys_page_offset(ipc_port_t, vm_object_offset_t *);
 
 extern kern_return_t mach_memory_entry_get_page_counts(
 	ipc_port_t      entry_port,

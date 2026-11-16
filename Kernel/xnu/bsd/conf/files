@@ -425,6 +425,7 @@ bsd/kern/kern_csr.c			optional config_csr
 bsd/kern/kern_symfile.c			standard
 bsd/kern/kern_descrip.c			standard
 bsd/kern/kern_guarded.c			standard
+bsd/kern/kern_ravyn_rootless.c		optional config_macf
 bsd/kern/kern_event.c			standard
 bsd/kern/kern_control.c			optional networking
 bsd/kern/kern_exec.c			standard
@@ -539,3 +540,5 @@ bsd/tests/copyio_tests.c		optional config_xnupost
 bsd/tests/pmap_test_sysctl.c		optional config_xnupost
 
 bsd/net/skywalk_stubs.c				standard
+
+bsd/kern/amfi_compat.c			standard

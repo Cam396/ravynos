@@ -44,6 +44,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * NOTICE: This file was modified by SPARTA, Inc. in 2005 to introduce
  * support for mandatory and extensible security protections.  This notice
  * is included in support of clause 2.2 (b) of the Apple Public License,
@@ -146,6 +151,7 @@
 #include <kern/kalloc.h>
 #include <vm/vm_kern.h>
 #include <libkern/OSAtomic.h>
+#include <machine/atomic.h>
 #include <libkern/section_keywords.h>
 
 #if CONFIG_MACF
@@ -163,7 +169,10 @@ struct pipepair {
 	lck_mtx_t     pp_mtx;
 	struct pipe   pp_rpipe;
 	struct pipe   pp_wpipe;
+	uint64_t      pp_pipe_id; /* shared by both ends; private pair layout */
 };
+
+static _Atomic uint64_t pipe_unique_id = 1;
 
 #define PIPE_PAIR(pipe) \
 	        __container_of(PIPE_MTX(pipe), struct pipepair, pp_mtx)
@@ -629,18 +638,20 @@ static int
 pipepair_alloc(struct pipe **rp_out, struct pipe **wp_out)
 {
 	struct pipepair *pp = zalloc(pipe_zone);
-	struct pipe *rpipe = &pp->pp_rpipe;
-	struct pipe *wpipe = &pp->pp_wpipe;
+	struct pipe *rpipe, *wpipe;
 
 	if (pp == NULL) {
 		return ENOMEM;
 	}
+	rpipe = &pp->pp_rpipe;
+	wpipe = &pp->pp_wpipe;
 
 	/*
 	 * protect so pipespace or pipeclose don't follow a junk pointer
 	 * if pipespace() fails.
 	 */
 	bzero(pp, sizeof(struct pipepair));
+	pp->pp_pipe_id = os_atomic_inc_orig(&pipe_unique_id, relaxed);
 	lck_mtx_init(&pp->pp_mtx, pipe_mtx_grp, pipe_mtx_attr);
 
 	rpipe->pipe_mtxp = &pp->pp_mtx;
@@ -1673,6 +1684,12 @@ filt_pipedetach(struct knote *kn)
 	PIPE_LOCK(cpipe);
 	KNOTE_DETACH(&rpipe->pipe_sel.si_note, kn);
 	PIPE_UNLOCK(cpipe);
+}
+
+uint64_t
+pipe_id(struct pipe *pipe)
+{
+	return PIPE_PAIR(pipe)->pp_pipe_id;
 }
 
 int

@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*-
  * Copyright (c) 1999, 2000, 2001, 2002 Robert N. M. Watson
@@ -321,7 +326,8 @@ mac_proc_check_debug(proc_t curp, struct proc *proc)
 	}
 
 	cred = kauth_cred_proc_ref(curp);
-	MAC_CHECK(proc_check_debug, cred, proc);
+	struct proc_ident identity = proc_ident(proc);
+	MAC_CHECK_ABI(proc_check_debug, (cred, proc), (cred, &identity), 1, 1);
 	kauth_cred_unref(&cred);
 
 	return error;
@@ -376,6 +382,9 @@ mac_proc_check_get_task_name(struct ucred *cred, struct proc *p)
 	int error;
 
 	MAC_CHECK(proc_check_get_task_name, cred, p);
+	if (error) return error;
+	struct proc_ident identity = proc_ident(p);
+	MAC_CHECK_V80(proc_check_get_task_with_flavor, (cred, &identity, TASK_FLAVOR_NAME));
 
 	return error;
 }
@@ -383,9 +392,25 @@ mac_proc_check_get_task_name(struct ucred *cred, struct proc *p)
 int
 mac_proc_check_get_task(struct ucred *cred, struct proc *p)
 {
+	return mac_proc_check_get_task_v80(cred, p, TASK_FLAVOR_CONTROL);
+}
+
+int
+mac_proc_check_get_task_v80(struct ucred *cred, struct proc *p, unsigned int flavor)
+{
 	int error;
 
-	MAC_CHECK(proc_check_get_task, cred, p);
+	if (flavor > TASK_FLAVOR_NAME) return EINVAL;
+	/* Preserve existing conservative legacy CONTROL authorization for READ.
+	 * Legacy registered drivers retain their original proc-pointer contract. */
+	if (flavor == TASK_FLAVOR_NAME) {
+		MAC_CHECK(proc_check_get_task_name, cred, p);
+	} else {
+		MAC_CHECK(proc_check_get_task, cred, p);
+	}
+	if (error) return error;
+	struct proc_ident identity = proc_ident(p);
+	MAC_CHECK_V80(proc_check_get_task_with_flavor, (cred, &identity, flavor));
 
 	return error;
 }
@@ -396,6 +421,9 @@ mac_proc_check_expose_task(struct ucred *cred, struct proc *p)
 	int error;
 
 	MAC_CHECK(proc_check_expose_task, cred, p);
+	if (error) return error;
+	struct proc_ident identity = proc_ident(p);
+	MAC_CHECK_V80(proc_check_expose_task_with_flavor, (cred, &identity, TASK_FLAVOR_CONTROL));
 
 	return error;
 }
@@ -688,4 +716,102 @@ mac_proc_check_set_cs_info(proc_t curp, proc_t target, unsigned int op)
 	kauth_cred_unref(&cred);
 
 	return error;
+}
+
+
+/* From pinned XNU 8020.140.41 security/mac_necp.c. */
+int
+mac_necp_check_open(proc_t proc, int flags)
+{
+	kauth_cred_t cred;
+	int error;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+
+	if (!mac_proc_check_enforce(proc)) {
+		return 0;
+	}
+
+	cred = kauth_cred_proc_ref(proc);
+	MAC_CHECK_V80(necp_check_open, (cred, flags));
+	kauth_cred_unref(&cred);
+
+	return error;
+}
+
+
+/* From pinned XNU 8020.140.41 security/mac_necp.c. */
+int
+mac_necp_check_client_action(proc_t proc, struct fileglob *fg, uint32_t action)
+{
+	kauth_cred_t cred;
+	int error;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+
+	if (!mac_proc_check_enforce(proc)) {
+		return 0;
+	}
+
+	cred = kauth_cred_proc_ref(proc);
+	MAC_CHECK_V80(necp_check_client_action, (cred, fg, action));
+	kauth_cred_unref(&cred);
+
+	return error;
+}
+
+
+/* From pinned XNU 8020.140.41 security/mac_process.c. */
+int
+mac_proc_check_memorystatus_control(proc_t proc, uint32_t command, pid_t pid)
+{
+	kauth_cred_t cred;
+	int error;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+	if (!mac_proc_check_enforce(proc)) {
+		return 0;
+	}
+
+	cred = kauth_cred_proc_ref(proc);
+	MAC_CHECK_V80(proc_check_memorystatus_control, (cred, command, pid));
+	kauth_cred_unref(&cred);
+
+	return error;
+}
+
+/* Token redemption has its own v80 hook; it is not get_task_with_flavor.
+ * Preserve conservative legacy authorization for policies using the old ABI. */
+int
+mac_proc_check_task_id_token_get_task(struct proc *target, unsigned int flavor)
+{
+    if (!target || flavor > TASK_FLAVOR_NAME) return EINVAL;
+    kauth_cred_t cred = kauth_cred_proc_ref(current_proc());
+    int error;
+    if (flavor == TASK_FLAVOR_NAME) {
+        MAC_CHECK(proc_check_get_task_name, cred, target);
+    } else {
+        MAC_CHECK(proc_check_get_task, cred, target);
+    }
+    if (!error) {
+        struct proc_ident identity = proc_ident(target);
+        MAC_CHECK_V80(proc_check_task_id_token_get_task, (cred, &identity, flavor));
+    }
+    kauth_cred_unref(&cred);
+    return error;
 }

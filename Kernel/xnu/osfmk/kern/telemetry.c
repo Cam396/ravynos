@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #include <mach/host_priv.h>
 #include <mach/host_special_ports.h>
 #include <mach/mach_types.h>
@@ -55,6 +60,8 @@
 #include <kern/monotonic.h>
 
 #include <sys/kdebug.h>
+#include <sys/errno.h>
+#include <security/mac_mach_internal.h>
 #include <uuid/uuid.h>
 #include <kdp/kdp_dyld.h>
 
@@ -77,6 +84,7 @@ struct micro_snapshot_buffer {
 };
 
 void telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro_snapshot_buffer * current_buffer);
+static void telemetry_take_sample_internal(thread_t, uint8_t, struct micro_snapshot_buffer *, bool);
 int telemetry_buffer_gather(user_addr_t buffer, uint32_t *length, boolean_t mark, struct micro_snapshot_buffer * current_buffer);
 
 #define TELEMETRY_DEFAULT_SAMPLE_RATE (1) /* 1 sample every 1 second */
@@ -119,6 +127,8 @@ int                                     telemetry_buffer_notify_at = 0;
 lck_grp_t telemetry_lck_grp;
 lck_mtx_t telemetry_mtx;
 lck_mtx_t telemetry_pmi_mtx;
+static lck_mtx_t telemetry_macf_mtx;
+static struct micro_snapshot_buffer telemetry_macf_buffer;
 
 #define TELEMETRY_LOCK() do { lck_mtx_lock(&telemetry_mtx); } while (0)
 #define TELEMETRY_TRY_SPIN_LOCK() lck_mtx_try_lock_spin(&telemetry_mtx)
@@ -126,6 +136,44 @@ lck_mtx_t telemetry_pmi_mtx;
 
 #define TELEMETRY_PMI_LOCK() do { lck_mtx_lock(&telemetry_pmi_mtx); } while (0)
 #define TELEMETRY_PMI_UNLOCK() do { lck_mtx_unlock(&telemetry_pmi_mtx); } while (0)
+
+
+static void
+telemetry_macf_error(thread_t thread, bool macf, int error)
+{
+#if CONFIG_MACF
+    if (macf) mac_thread_telemetry(thread, error, NULL, 0);
+#else
+    (void)thread; (void)macf; (void)error;
+#endif
+}
+
+int
+telemetry_macf_mark_curthread(void)
+{
+#if CONFIG_MACF
+    thread_t thread = current_thread();
+    if (thread->task == kernel_task) return EINVAL;
+    lck_mtx_lock(&telemetry_macf_mtx);
+    if (telemetry_macf_buffer.buffer == 0) {
+        vm_offset_t address = 0;
+        kern_return_t kr = kmem_alloc(kernel_map, &address,
+            TELEMETRY_DEFAULT_BUFFER_SIZE, VM_KERN_MEMORY_SECURITY);
+        if (kr != KERN_SUCCESS) {
+            lck_mtx_unlock(&telemetry_macf_mtx);
+            return ENOMEM;
+        }
+        bzero((void *)address, TELEMETRY_DEFAULT_BUFFER_SIZE);
+        telemetry_macf_buffer.buffer = address;
+        telemetry_macf_buffer.size = TELEMETRY_DEFAULT_BUFFER_SIZE;
+    }
+    lck_mtx_unlock(&telemetry_macf_mtx);
+    act_set_macf_telemetry_ast(thread);
+    return 0;
+#else
+    return ENOTSUP;
+#endif
+}
 
 void
 telemetry_init(void)
@@ -136,6 +184,7 @@ telemetry_init(void)
 	lck_grp_init(&telemetry_lck_grp, "telemetry group", LCK_GRP_ATTR_NULL);
 	lck_mtx_init(&telemetry_mtx, &telemetry_lck_grp, LCK_ATTR_NULL);
 	lck_mtx_init(&telemetry_pmi_mtx, &telemetry_lck_grp, LCK_ATTR_NULL);
+	lck_mtx_init(&telemetry_macf_mtx, &telemetry_lck_grp, LCK_ATTR_NULL);
 
 	if (!PE_parse_boot_argn("telemetry_buffer_size", &telemetry_buffer.size, sizeof(telemetry_buffer.size))) {
 		telemetry_buffer.size = TELEMETRY_DEFAULT_BUFFER_SIZE;
@@ -443,11 +492,27 @@ telemetry_ast(thread_t thread, ast_t reasons)
 
 	uint8_t microsnapshot_flags = record_type | user_telemetry;
 
-	telemetry_take_sample(thread, microsnapshot_flags, &telemetry_buffer);
+#if CONFIG_MACF
+    if (reasons & AST_TELEMETRY_MACF) {
+        telemetry_take_sample_internal(thread, microsnapshot_flags | kMACFRecord,
+            &telemetry_macf_buffer, true);
+    }
+#endif
+    if (reasons & (AST_TELEMETRY_IO | AST_TELEMETRY_USER |
+        AST_TELEMETRY_KERNEL | AST_TELEMETRY_PMI)) {
+        telemetry_take_sample(thread, microsnapshot_flags, &telemetry_buffer);
+    }
 }
 
 void
-telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro_snapshot_buffer * current_buffer)
+telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro_snapshot_buffer *current_buffer)
+{
+    telemetry_take_sample_internal(thread, microsnapshot_flags, current_buffer, false);
+}
+
+static void
+telemetry_take_sample_internal(thread_t thread, uint8_t microsnapshot_flags,
+    struct micro_snapshot_buffer *current_buffer, bool macf)
 {
 	task_t task;
 	void *p;
@@ -461,6 +526,7 @@ telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro
 	uint32_t current_record_start;
 	uint32_t tmp = 0;
 	boolean_t notify = FALSE;
+	bool record_complete = false;
 
 	if (thread == THREAD_NULL) {
 		return;
@@ -468,6 +534,7 @@ telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro
 
 	task = thread->task;
 	if ((task == TASK_NULL) || (task == kernel_task) || task_did_exec(task) || task_is_exec_copy(task)) {
+		telemetry_macf_error(thread, macf, EBUSY);
 		return;
 	}
 
@@ -484,12 +551,30 @@ telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro
 	 * copies from userland here, before taking the lock.
 	 */
 
-	uintptr_t frames[128];
+	uintptr_t frames_stack[128];
+	uintptr_t *frames = frames_stack;
+	size_t frame_capacity = 128;
+	bool frames_allocated = false, truncated = false;
 	bool user64_regs = false;
 	int bterror = 0;
-	btcount = backtrace_user(frames,
-	    sizeof(frames) / sizeof(frames[0]), &bterror, &user64_regs, NULL);
+	btcount = backtrace_user(frames, frame_capacity, &bterror,
+	    &user64_regs, macf ? &truncated : NULL);
+	/* The old walker has no continuation address. Rewalk the stable current
+	 * user stack with a larger bounded buffer, rather than dropping tail frames. */
+	while (macf && truncated && bterror == 0 && frame_capacity < 1280) {
+		if (frames_allocated) kfree(frames, frame_capacity * sizeof(*frames));
+		frame_capacity += 128;
+		frames = kalloc(frame_capacity * sizeof(*frames));
+		frames_allocated = frames != NULL;
+		if (frames == NULL) { bterror = ENOMEM; break; }
+		truncated = false;
+		btcount = backtrace_user(frames, frame_capacity, &bterror,
+		    &user64_regs, &truncated);
+	}
+	if (macf && truncated && bterror == 0) bterror = EOVERFLOW;
 	if (bterror != 0) {
+		if (frames_allocated) kfree(frames, frame_capacity * sizeof(*frames));
+		telemetry_macf_error(thread, macf, bterror);
 		return;
 	}
 	bool user64_va = task_has_64Bit_addr(task);
@@ -566,6 +651,8 @@ telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro
 
 	if (uuid_info_count > 0) {
 		if ((uuid_info_array = (char *)kalloc(uuid_info_array_size)) == NULL) {
+			if (frames_allocated) kfree(frames, frame_capacity * sizeof(*frames));
+			telemetry_macf_error(thread, macf, ENOMEM);
 			return;
 		}
 
@@ -601,7 +688,7 @@ telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro
 
 	clock_get_calendar_microtime(&secs, &usecs);
 
-	TELEMETRY_LOCK();
+	if (macf) lck_mtx_lock(&telemetry_macf_mtx); else TELEMETRY_LOCK();
 
 	/*
 	 * If our buffer is not backed by anything,
@@ -858,8 +945,20 @@ copytobuffer:
 		}
 	}
 
+	record_complete = true;
 cancel_sample:
-	TELEMETRY_UNLOCK();
+#if CONFIG_MACF
+	if (macf) {
+		if (record_complete) {
+			mac_thread_telemetry(thread, 0,
+			    (const void *)(current_buffer->buffer + current_record_start),
+			    current_buffer->current_position - current_record_start);
+		} else {
+			mac_thread_telemetry(thread, ENOSPC, NULL, 0);
+		}
+	}
+#endif
+	if (macf) lck_mtx_unlock(&telemetry_macf_mtx); else TELEMETRY_UNLOCK();
 
 	KDBG(MACHDBG_CODE(DBG_MACH_STACKSHOT, MICROSTACKSHOT_RECORD) | DBG_FUNC_END,
 	    notify, telemetry_bytes_since_last_mark,
@@ -872,6 +971,7 @@ cancel_sample:
 	if (uuid_info_array != NULL) {
 		kfree(uuid_info_array, uuid_info_array_size);
 	}
+	if (frames_allocated) kfree(frames, frame_capacity * sizeof(*frames));
 }
 
 #if TELEMETRY_DEBUG

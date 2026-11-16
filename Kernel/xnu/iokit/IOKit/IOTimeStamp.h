@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #ifndef IOKIT_IOTIMESTAMP_H
 #define IOKIT_IOTIMESTAMP_H
 
@@ -208,3 +213,11 @@ IOTimeStamp(uintptr_t csc,
 #define IOREGISTRYENTRY_NAME                     2      /* 0x05090008 */
 
 #endif /* ! IOKIT_IOTIMESTAMP_H */
+
+#ifndef IODBG_IOMDPA
+#define IODBG_IOMDPA(code) KDBG_CODE(DBG_IOKIT, DBG_IOMDPA, code)
+#define IOMDPA_MAPPED 1
+#define IOMDPA_UNMAPPED 2
+#define IOMDPA_SEGMENTS_PAGE 3
+#define IOMDPA_SEGMENTS_LONG 4
+#endif

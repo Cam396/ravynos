@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 /*
@@ -502,6 +507,7 @@ struct thread {
 	/* Ports associated with this thread */
 	struct ipc_port                 *ith_self;                      /* not a right, doesn't hold ref */
 	struct ipc_port                 *ith_sself;                     /* a send right */
+	struct ipc_port                 *ith_read;                      /* read-only thread port */
 	struct ipc_port                 *ith_special_reply_port;         /* ref to special reply port */
 	struct exception_action *exc_actions;
 
@@ -697,6 +703,9 @@ extern void                     thread_deallocate(
 
 extern void                     thread_inspect_deallocate(
 	thread_inspect_t        thread);
+
+extern void                     thread_read_deallocate(
+	thread_read_t           thread);
 
 extern void                     thread_terminate_self(void);
 
@@ -1195,6 +1204,7 @@ extern void act_set_kperf(thread_t);
 extern void act_set_astledger(thread_t thread);
 extern void act_set_astledger_async(thread_t thread);
 extern void act_set_io_telemetry_ast(thread_t);
+extern void act_set_macf_telemetry_ast(thread_t);
 
 extern uint32_t dtrace_get_thread_predcache(thread_t);
 extern int64_t dtrace_get_thread_vtime(thread_t);

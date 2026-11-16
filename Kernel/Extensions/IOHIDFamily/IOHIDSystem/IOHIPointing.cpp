@@ -21,6 +21,11 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * 17 July 	1998 	sdouglas	Initial creation
  * 01 April 	2002 	ryepez		added support for scroll acceleration
  */
@@ -470,7 +475,9 @@ IOReturn IOHIPointing::message( UInt32 type, IOService * provider,
     switch(type)
     {
         case kIOHIDSystemDeviceSeizeRequestMessage:
-            if (OSDynamicCast(IOHIDDevice, provider))
+            // Resolve the optional modern HID provider by class name so legacy
+            // pointing devices do not require its separate implementation.
+            if (OSMetaClass::checkMetaCastWithName("IOHIDDevice", provider))
             {
                 _isSeized = (bool)argument;
             }

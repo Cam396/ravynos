@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -71,6 +76,41 @@
 #include <mach_debug/zone_info.h>
 #include <kern/kern_types.h>
 #include <sys/cdefs.h>
+
+/* Monterey read-only zone KPI subset, ABI-compatible with XNU 8020. */
+typedef uint16_t zone_id_t;
+typedef uint32_t zalloc_flags_t;
+typedef uint32_t zro_atomic_op_t;
+typedef uint32_t zone_create_ro_id_t;
+__options_decl(zone_create_flags_t, uint64_t, {
+ ZC_NONE=0, ZC_CACHING=0x00000010, ZC_NOCACHING=0x00000020, ZC_READONLY=0x00800000,
+ ZC_ZFREE_CLEARMEM=0x02000000, ZC_NOGC=0x04000000,
+ ZC_NOENCRYPT=0x08000000, ZC_ALIGNMENT_REQUIRED=0x10000000,
+ ZC_NOGZALLOC=0x20000000, ZC_NOCALLOUT=0x40000000
+});
+enum { Z_WAITOK=0, Z_NOWAIT=0x0001, Z_NOPAGEWAIT=0x0002,
+       Z_ZERO=0x0004, Z_NOFAIL=0x8000 };
+enum { ZC_RO_ID_SANDBOX=0, ZC_RO_ID_PROFILE=1, ZC_RO_ID_PROTOBOX=2,
+       ZC_RO_ID_SB_FILTER=3, ZC_RO_ID__LAST=ZC_RO_ID_SB_FILTER };
+enum {
+ ZRO_ATOMIC_OR_8=0x11,ZRO_ATOMIC_OR_16=0x12,ZRO_ATOMIC_OR_32=0x14,ZRO_ATOMIC_OR_64=0x18,
+ ZRO_ATOMIC_XOR_8=0x21,ZRO_ATOMIC_XOR_16=0x22,ZRO_ATOMIC_XOR_32=0x24,ZRO_ATOMIC_XOR_64=0x28,
+ ZRO_ATOMIC_AND_8=0x31,ZRO_ATOMIC_AND_16=0x32,ZRO_ATOMIC_AND_32=0x34,ZRO_ATOMIC_AND_64=0x38,
+ ZRO_ATOMIC_ADD_8=0x41,ZRO_ATOMIC_ADD_16=0x42,ZRO_ATOMIC_ADD_32=0x44,ZRO_ATOMIC_ADD_64=0x48,
+ ZRO_ATOMIC_XCHG_8=0x51,ZRO_ATOMIC_XCHG_16=0x52,ZRO_ATOMIC_XCHG_32=0x54,ZRO_ATOMIC_XCHG_64=0x58
+};
+__BEGIN_DECLS
+extern zone_t zone_create(const char *, vm_size_t, zone_create_flags_t);
+extern void *zalloc_flags(zone_t, zalloc_flags_t);
+extern void kern_os_zfree(zone_t, void *, vm_size_t);
+__END_DECLS
+
+extern zone_id_t zone_create_ro(const char *, vm_size_t, zone_create_flags_t, zone_create_ro_id_t);
+extern void *zalloc_ro(zone_id_t, zalloc_flags_t);
+extern void zalloc_ro_mut(zone_id_t, void *, vm_offset_t, const void *, vm_size_t);
+extern uint64_t zalloc_ro_mut_atomic(zone_id_t, void *, vm_offset_t, zro_atomic_op_t, uint64_t);
+extern void zfree_ro(zone_id_t, void *);
+extern void zone_require_ro(zone_id_t, vm_size_t, void *);
 
 #ifdef  MACH_KERNEL_PRIVATE
 
@@ -157,7 +197,8 @@ struct zone {
 	/* boolean_t */ cpu_cache_enabled  :1,
 	/* boolean_t */ clear_memory       :1,
 	/* boolean_t */ zone_destruction   :1,
-	/* future    */ _reserved          :33;
+	/* boolean_t */ zero_on_free       :1,
+	/* future    */ _reserved          :32;
 
 	int             index;          /* index into zone_info arrays for this zone */
 	const char      *zone_name;     /* a name for the zone */
@@ -297,6 +338,9 @@ extern void *   zalloc_attempt(         zone_t          zone);
 /* Non-waiting for memory version of zalloc */
 extern void *   zalloc_nopagewait(
 	zone_t          zone);
+
+/* No page wait, retaining kalloc request-size/tag accounting. */
+extern void *   zalloc_nopagewait_tag(zone_t zone, vm_size_t reqsize, vm_tag_t tag);
 
 /* selective version of zalloc */
 extern void *   zalloc_canblock(

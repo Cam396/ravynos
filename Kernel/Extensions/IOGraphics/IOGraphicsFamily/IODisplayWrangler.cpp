@@ -19,6 +19,11 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <IOKit/assert.h>
 #include <IOKit/IOLib.h>
@@ -204,6 +209,37 @@ bool IODisplayWrangler::serverStart(void)
 
     IODW_END(serverStart,sIODisplayWrangler != 0,0,0);
     return (sIODisplayWrangler != 0);
+}
+
+// IOKit's IOAccelCreateAccelID opens this service with type zero.  Supply
+// the actual task-owned ID allocator, also for the combined GOP bundle.
+IOReturn IODisplayWrangler::newUserClient(task_t owningTask, void *securityID,
+    UInt32 type, OSDictionary *properties, IOUserClient **handler)
+{
+    if (handler == nullptr)
+        return kIOReturnBadArgument;
+    *handler = nullptr;
+    if (type != 0)
+        return kIOReturnUnsupported;
+
+    IOAccelerationUserClient *client = new IOAccelerationUserClient;
+    if (client == nullptr)
+        return kIOReturnNoMemory;
+    if (!client->initWithTask(owningTask, securityID, type, properties)) {
+        client->release();
+        return kIOReturnBadArgument;
+    }
+    if (!client->attach(this)) {
+        client->release();
+        return kIOReturnUnsupported;
+    }
+    if (!client->start(this)) {
+        client->detach(this);
+        client->release();
+        return kIOReturnUnsupported;
+    }
+    *handler = client;
+    return kIOReturnSuccess;
 }
 
 bool IODisplayWrangler::start( IOService * provider )

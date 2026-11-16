@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #ifndef _KERN_WORK_INTERVAL_H_
 #define _KERN_WORK_INTERVAL_H_
@@ -63,6 +68,9 @@ struct kern_work_interval_create_args {
  */
 extern kern_return_t
 kern_work_interval_create(thread_t thread, struct kern_work_interval_create_args *create_params);
+
+extern boolean_t
+work_interval_port_type_render_server(mach_port_name_t name);
 
 extern kern_return_t
 kern_work_interval_destroy(thread_t thread, uint64_t work_interval_id);

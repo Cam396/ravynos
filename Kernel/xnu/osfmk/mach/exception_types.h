@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -122,6 +127,9 @@
 /*	Send a catch_exception_raise_state_identity message including
  *	the thread identity and state.
  */
+
+# define EXCEPTION_IDENTITY_PROTECTED       4
+/* Send the thread ID and a task identity token, never live CONTROL ports. */
 
 #define MACH_EXCEPTION_ERRORS           0x40000000
 /*	include additional exception specific errors, not used yet.  */

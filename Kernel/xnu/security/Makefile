@@ -33,7 +33,8 @@ PRIVATE_KERNELFILES = \
 	mac_framework.h \
 	mac_internal.h \
 	mac_mach_internal.h \
-	mac_policy.h
+	mac_policy.h \
+	mac_policy_v80.h
 
 INSTALL_MI_LIST = ${DATAFILES}
 

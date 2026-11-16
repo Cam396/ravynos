@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #ifndef _KERNEL_TELEMETRY_H_
 #define _KERNEL_TELEMETRY_H_
@@ -52,6 +57,7 @@ enum telemetry_pmi {
 extern volatile boolean_t telemetry_needs_record;
 
 extern void telemetry_init(void);
+extern int telemetry_macf_mark_curthread(void);
 
 extern void compute_telemetry(void *);
 

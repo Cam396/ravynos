@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 /*
@@ -76,6 +81,8 @@
 #include <mach/kern_return.h>
 #include <kern/ipc_kobject.h>
 #include <kern/thread.h>
+#include <kern/kalloc.h>
+#include <kern/mach_filter.h>
 #include <kern/misc_protos.h>
 #include <kern/waitq.h>
 #include <kern/policy_internal.h>
@@ -85,6 +92,7 @@
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_port.h>
+#include <ipc/ipc_service_port.h>
 #include <ipc/ipc_pset.h>
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_mqueue.h>
@@ -634,6 +642,151 @@ ipc_port_clear_receiver(
  *		Doesn't touch the ip_object fields.
  */
 
+
+/*
+ * Service-port label ownership follows the receive right. Retain Sandbox
+ * labels under the port lock and invoke consuming callbacks after unlocking.
+ */
+kern_return_t
+ipc_service_port_label_alloc(
+    mach_service_port_info_t service_port_info,
+    void **port_label_ptr)
+{
+    ipc_service_port_label_t label;
+    void *sblabel = NULL;
+    kern_return_t kr = KERN_SUCCESS;
+
+    if (service_port_info == NULL || port_label_ptr == NULL) {
+        return KERN_INVALID_ARGUMENT;
+    }
+
+    label = (ipc_service_port_label_t)kalloc(sizeof(*label));
+    if (label == IPC_SERVICE_PORT_LABEL_NULL) {
+        return KERN_RESOURCE_SHORTAGE;
+    }
+    memset(label, 0, sizeof(*label));
+
+    if (mach_msg_filter_at_least(MACH_MSG_FILTER_CALLBACKS_VERSION_1)) {
+        kr = mach_msg_filter_alloc_service_port_sblabel_callback(service_port_info, &sblabel);
+        if (kr != KERN_SUCCESS) {
+            kfree(label, sizeof(*label));
+            return kr;
+        }
+    }
+
+    label->ispl_sblabel = sblabel;
+    label->ispl_launchd_name = MACH_PORT_NULL;
+    label->ispl_domain = service_port_info->mspi_domain_type;
+    memcpy(label->ispl_service_name, service_port_info->mspi_string_name,
+        sizeof(label->ispl_service_name));
+    if (label->ispl_domain == 7) {
+        label->ispl_flags |= ISPL_FLAGS_BOOTSTRAP_PORT;
+    }
+    *port_label_ptr = label;
+    return KERN_SUCCESS;
+}
+
+void
+ipc_service_port_label_dealloc(void *port_label, boolean_t service_port)
+{
+    void *sblabel = port_label;
+
+    if (service_port && port_label != NULL) {
+        ipc_service_port_label_t label = (ipc_service_port_label_t)port_label;
+        sblabel = label->ispl_sblabel;
+        memset(label, 0, sizeof(*label));
+        kfree(label, sizeof(*label));
+    }
+
+    if (sblabel != NULL) {
+        assert(mach_msg_filter_dealloc_service_port_sblabel_callback != NULL);
+        mach_msg_filter_dealloc_service_port_sblabel_callback(sblabel);
+    }
+}
+
+kern_return_t
+ipc_service_port_derive_sblabel(
+    mach_port_name_t service_port_name,
+    void **sblabel_ptr,
+    boolean_t *filter_msgs)
+{
+    ipc_port_t port;
+    ipc_service_port_label_t label;
+    void *service_sblabel = NULL;
+    void *derived_sblabel = NULL;
+    boolean_t send_filtering = FALSE;
+    kern_return_t kr;
+
+    if (sblabel_ptr == NULL || filter_msgs == NULL) {
+        return KERN_INVALID_ARGUMENT;
+    }
+    *sblabel_ptr = NULL;
+    *filter_msgs = FALSE;
+
+    if (!MACH_PORT_VALID(service_port_name)) {
+        return KERN_INVALID_NAME;
+    }
+    if (!mach_msg_filter_at_least(MACH_MSG_FILTER_CALLBACKS_VERSION_1)) {
+        return KERN_SUCCESS;
+    }
+
+    kr = ipc_port_translate_send(current_space(), service_port_name, &port);
+    if (kr != KERN_SUCCESS) {
+        return kr;
+    }
+
+    if (ip_is_kolabeled(port) || !port->ip_service_port) {
+        ip_unlock(port);
+        return KERN_INVALID_CAPABILITY;
+    }
+
+    label = (ipc_service_port_label_t)port->ip_splabel;
+    if (label != IPC_SERVICE_PORT_LABEL_NULL) {
+        service_sblabel = label->ispl_sblabel;
+        if (service_sblabel != NULL) {
+            mach_msg_filter_retain_sblabel_callback(service_sblabel);
+        }
+    }
+    ip_unlock(port);
+
+    if (service_sblabel != NULL) {
+        /* The derive callback consumes the retained service label. */
+        derived_sblabel = mach_msg_filter_derive_sblabel_from_service_port_callback(
+            service_sblabel, &send_filtering);
+    }
+
+    *sblabel_ptr = derived_sblabel;
+    *filter_msgs = send_filtering;
+    return KERN_SUCCESS;
+}
+
+void *
+ipc_service_port_get_sblabel(ipc_port_t port)
+{
+    if (port == IP_NULL || ip_is_kolabeled(port) || port->ip_splabel == NULL) {
+        return NULL;
+    }
+
+    if (!port->ip_service_port) {
+        return port->ip_splabel;
+    }
+    return ((ipc_service_port_label_t)port->ip_splabel)->ispl_sblabel;
+}
+
+void
+ipc_service_port_label_set_attr(
+    ipc_service_port_label_t port_splabel,
+    mach_port_name_t name,
+    mach_port_context_t context)
+{
+    assert(port_splabel != IPC_SERVICE_PORT_LABEL_NULL);
+    port_splabel->ispl_launchd_name = name;
+    port_splabel->ispl_launchd_context = context;
+    if (context != 0) {
+        port_splabel->ispl_flags |= ISPL_FLAGS_SPECIAL_PDREQUEST;
+    }
+}
+
 void
 ipc_port_init(
 	ipc_port_t              port,
@@ -660,6 +813,15 @@ ipc_port_init(
 
 	port->ip_premsg = IKM_NULL;
 	port->ip_context = 0;
+	port->ip_service_port_guard = 0;
+	port->ip_service_port_name = MACH_PORT_NULL;
+	port->ip_service_port = FALSE;
+	port->ip_service_port_pdnotification = FALSE;
+    port->ip_splabel = NULL;
+	port->ip_tg_block_tracking = (flags & IPC_PORT_INIT_TG_BLOCK_TRACKING) != 0;
+    if (flags & IPC_PORT_INIT_FILTER_MESSAGE) {
+        port->ip_object.io_bits |= IP_BIT_FILTER_MSG;
+    }
 	port->ip_reply_context = 0;
 
 	port->ip_sprequests  = 0;
@@ -934,6 +1096,8 @@ ipc_port_destroy(ipc_port_t port)
 	ipc_mqueue_t mqueue;
 	ipc_kmsg_t kmsg;
 	boolean_t special_reply = port->ip_specialreply;
+    void *port_splabel = NULL;
+    boolean_t port_splabel_is_service = FALSE;
 	struct task_watchport_elem *watchport_elem = NULL;
 
 #if IMPORTANCE_INHERITANCE
@@ -977,6 +1141,9 @@ ipc_port_destroy(ipc_port_t port)
 #endif /* IMPORTANCE_INHERITANCE */
 
 	if (pdrequest != IP_NULL) {
+		if (port->ip_service_port) {
+			port->ip_service_port_pdnotification = TRUE;
+		}
 		/* clear receiver, don't destroy the port */
 		(void)ipc_port_clear_receiver(port, FALSE);
 		assert(port->ip_in_pset == 0);
@@ -1017,6 +1184,9 @@ ipc_port_destroy(ipc_port_t port)
 	 */
 	boolean_t reap_msgs = FALSE;
 	reap_msgs = ipc_port_clear_receiver(port, TRUE); /* marks port and mqueue inactive */
+    port_splabel = port->ip_splabel;
+    port->ip_splabel = NULL;
+    port_splabel_is_service = port->ip_service_port;
 	assert(port->ip_in_pset == 0);
 	assert(port->ip_mscount == 0);
 
@@ -1056,7 +1226,12 @@ ipc_port_destroy(ipc_port_t port)
 		/* mqueue and port unlocked */
 	}
 
-	/* Deallocate the watchport element */
+	/* Release Sandbox label callbacks after the port lock has been dropped. */
+    if (port_splabel != NULL) {
+        ipc_service_port_label_dealloc(port_splabel, port_splabel_is_service);
+    }
+
+    /* Deallocate the watchport element */
 	if (watchport_elem) {
 		task_watchport_elem_deallocate(watchport_elem);
 		watchport_elem = NULL;

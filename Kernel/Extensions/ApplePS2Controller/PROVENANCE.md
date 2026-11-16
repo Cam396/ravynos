@@ -1,0 +1,5 @@
+# PS/2 mouse port provenance
+
+ApplePS2Mouse.cpp/.h originate from https://github.com/apple-oss-distributions/ApplePS2Mouse at 031c262b4ee1d7c48bfe962c8395d3266cf91917. Original APSL headers retained. Local changes adapt callbacks to the controller C function ABI, initialize state, add diagnostics and optional VMware pointer integration.
+
+VMwarePointer.cpp/.h are a local implementation of the published VMware absolute-pointer I/O-port protocol, not copied Linux driver code. Protocol references inspected 2026-10-19: VMware open-vm-tools lib/include/backdoor_def.h (https://github.com/vmware/open-vm-tools/blob/master/open-vm-tools/lib/include/backdoor_def.h); VMware-authored Linux drivers/input/mouse/vmmouse.c (https://github.com/torvalds/linux/blob/master/drivers/input/mouse/vmmouse.c). Constants39/40/41, ID handshake, 4-word records, button bits, absolute/relative flag and coordinate range correspond to that interface. CPU vendor and GETVERSION checks gate I/O; original PS/2 path remains fallback.

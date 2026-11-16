@@ -21,6 +21,11 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  *
  *	File: mach/shared_region.h
  *
@@ -42,10 +47,10 @@
 #define SHARED_REGION_NESTING_MIN_I386          0x00200000ULL
 #define SHARED_REGION_NESTING_MAX_I386          0xFFE00000ULL
 
-#define SHARED_REGION_BASE_X86_64               0x00007FFF00000000ULL
-#define SHARED_REGION_SIZE_X86_64               0x00000000FFE00000ULL
-#define SHARED_REGION_NESTING_BASE_X86_64       0x00007FFF00000000ULL
-#define SHARED_REGION_NESTING_SIZE_X86_64       0x00000000FFE00000ULL
+#define SHARED_REGION_BASE_X86_64               0x00007FF800000000ULL
+#define SHARED_REGION_SIZE_X86_64               0x00000007FE000000ULL
+#define SHARED_REGION_NESTING_BASE_X86_64       0x00007FF800000000ULL
+#define SHARED_REGION_NESTING_SIZE_X86_64       0x00000007FE000000ULL
 #define SHARED_REGION_NESTING_MIN_X86_64        0x0000000000200000ULL
 #define SHARED_REGION_NESTING_MAX_X86_64        0xFFFFFFFFFFE00000ULL
 
@@ -148,9 +153,28 @@ struct shared_file_mapping_np {
 	vm_prot_t               sfm_max_prot;
 	vm_prot_t               sfm_init_prot;
 };
+
+/* One mapping in the multi-file shared-cache interface. */
+struct shared_file_mapping_slide_np {
+	mach_vm_address_t       sms_address;
+	mach_vm_size_t          sms_size;
+	mach_vm_offset_t        sms_file_offset;
+	user_addr_t             sms_slide_size;
+	user_addr_t             sms_slide_start;
+	vm_prot_t               sms_max_prot;
+	vm_prot_t               sms_init_prot;
+};
+
+/* One file descriptor and its contiguous range of mapping records. */
+struct shared_file_np {
+	int                     sf_fd;
+	uint32_t                sf_mappings_count;
+	uint32_t                sf_slide;
+};
 #define VM_PROT_COW  0x8  /* must not interfere with normal prot assignments */
 #define VM_PROT_ZF  0x10  /* must not interfere with normal prot assignments */
 #define VM_PROT_SLIDE  0x20  /* must not interfere with normal prot assignments */
+#define VM_PROT_NOAUTH  0x40  /* mapping does not require pointer signing */
 
 #ifndef KERNEL
 

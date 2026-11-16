@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -82,12 +87,14 @@
 
 #include <kern/kern_types.h>
 #include <kern/assert.h>
+#include <kern/mach_filter.h>
 #include <kern/debug.h>
 #include <kern/ipc_kobject.h>
 #include <kern/kalloc.h>
 #include <kern/zalloc.h>
 #include <kern/processor.h>
 #include <kern/thread.h>
+#include <kern/task.h>
 #include <kern/sched_prim.h>
 #include <kern/misc_protos.h>
 #include <kern/counters.h>
@@ -110,6 +117,7 @@
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_port.h>
+#include <ipc/ipc_service_port.h>
 #include <ipc/ipc_right.h>
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_table.h>
@@ -3671,9 +3679,13 @@ ipc_kmsg_copyin(
 	ipc_space_t             space,
 	vm_map_t                map,
 	mach_msg_priority_t override,
-	mach_msg_option_t       *optionp)
+	mach_msg_option_t       *optionp,
+	boolean_t               user_origin,
+	boolean_t               filter_nonfatal)
 {
 	mach_msg_return_t           mr;
+	mach_port_name_t            dest_name =
+	    CAST_MACH_PORT_TO_NAME(kmsg->ikm_header->msgh_remote_port);
 
 	kmsg->ikm_header->msgh_bits &= MACH_MSGH_BITS_USER;
 
@@ -3681,6 +3693,64 @@ ipc_kmsg_copyin(
 
 	if (mr != MACH_MSG_SUCCESS) {
 		return mr;
+	}
+
+
+	/*
+	 * Enforce Sandbox message policy only for messages originating at the
+	 * user trap. This runs after header-right copyin and before body rights,
+	 * port descriptors, or out-of-line memory are copied.
+	 */
+	if (user_origin &&
+	    mach_msg_filter_at_least(MACH_MSG_FILTER_CALLBACKS_VERSION_1) &&
+	    task_get_filter_msg_flag(current_task())) {
+		ipc_port_t remote_port = kmsg->ikm_header->msgh_remote_port;
+		void *sblabel = NULL;
+		mach_msg_filter_id filter_id = MACH_MSG_FILTER_POLICY_ALLOW;
+		mach_msg_id_t filter_msg_id = kmsg->ikm_header->msgh_id;
+		boolean_t reject = FALSE;
+
+		if (ip_enforce_msg_filtering(remote_port)) {
+			ip_lock(remote_port);
+			if (ip_active(remote_port)) {
+				if (remote_port->ip_service_port) {
+					ipc_service_port_label_t label =
+					    (ipc_service_port_label_t)remote_port->ip_splabel;
+					if (label != IPC_SERVICE_PORT_LABEL_NULL) {
+						sblabel = label->ispl_sblabel;
+						if (ipc_service_port_label_is_bootstrap_port(label)) {
+							uint32_t protocol = ((uint32_t)filter_msg_id) >> 24;
+							if (protocol == 0) {
+								reject = TRUE;
+							} else {
+								filter_msg_id &= 0x00ffffff;
+							}
+						}
+					}
+				} else {
+					assert(!ip_is_kolabeled(remote_port));
+					/* Connection ports can also have send-side message filters. */
+					sblabel = remote_port->ip_splabel;
+				}
+				if (!reject && sblabel != NULL) {
+					mach_msg_filter_retain_sblabel_callback(sblabel);
+				}
+			}
+			ip_unlock(remote_port);
+		}
+
+		if (!reject && sblabel != NULL &&
+		    !mach_msg_fetch_filter_policy(sblabel, filter_msg_id, &filter_id)) {
+			reject = TRUE;
+		}
+		if (reject) {
+			if (!filter_nonfatal) {
+				mach_port_guard_exception(dest_name, 0, 0,
+				    kGUARD_EXC_MSG_FILTERED);
+			}
+			ipc_kmsg_clean_partial(kmsg, 0, NULL, 0, 0);
+			return MACH_SEND_MSG_FILTERED;
+		}
 	}
 
 	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_MSG_SEND) | DBG_FUNC_NONE,

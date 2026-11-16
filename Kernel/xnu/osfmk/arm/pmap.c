@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #include <string.h>
 #include <mach_assert.h>
 #include <mach_ldebug.h>
@@ -6229,6 +6234,11 @@ pmap_remove_range_options(
 			 * We should break out as a consequence of checking pa_valid.
 			 */
 			//assert(!ARM_PTE_IS_COMPRESSED(spte));
+            /* Empty/compressed entries do not name a physical mapping.
+             * On low-DDR boards PA 0 is valid, so pa_valid(0) cannot serve
+             * as an implicit invalid-PTE check. Keep all PV assertions. */
+            if ((spte & ARM_PTE_TYPE_VALID) != ARM_PTE_TYPE)
+                break;
 			pa = pte_to_pa(spte);
 			if (!pa_valid(pa)) {
 #if XNU_MONITOR || HAS_MILD_DSB

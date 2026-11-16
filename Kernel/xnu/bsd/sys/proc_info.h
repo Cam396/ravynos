@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #ifndef _SYS_PROC_INFO_H
 #define _SYS_PROC_INFO_H
@@ -108,7 +113,8 @@ struct proc_uniqidentifierinfo {
 	uint8_t                 p_uuid[16];             /* UUID of the main executable */
 	uint64_t                p_uniqueid;             /* 64 bit unique identifier for process */
 	uint64_t                p_puniqueid;            /* unique identifier for process's parent */
-	uint64_t                p_reserve2;             /* reserved for future use */
+	int32_t                 p_idversion;            /* pid version */
+	uint32_t                p_reserve2;             /* reserved for future use */
 	uint64_t                p_reserve3;             /* reserved for future use */
 	uint64_t                p_reserve4;             /* reserved for future use */
 };
@@ -770,6 +776,9 @@ struct proc_fileportinfo {
 #define PROC_PID_RUSAGE_SIZE            0
 
 #ifdef  PRIVATE
+#define PIF_COMPARE_IDVERSION 0x01
+#define PIF_COMPARE_UNIQUEID  0x02
+
 #define PROC_PIDUNIQIDENTIFIERINFO      17
 #define PROC_PIDUNIQIDENTIFIERINFO_SIZE \
 	                                (sizeof(struct proc_uniqidentifierinfo))
@@ -958,6 +967,10 @@ struct proc_fileportinfo {
 #define PROC_INFO_CALL_PIDDYNKQUEUEINFO  0xd
 #define PROC_INFO_CALL_UDATA_INFO        0xe
 #endif /* PRIVATE */
+
+#ifdef KERNEL_PRIVATE
+extern int proc_fdlist(proc_t p, struct proc_fdinfo *buf, size_t *count);
+#endif
 
 #ifdef XNU_KERNEL_PRIVATE
 #ifndef pshmnode

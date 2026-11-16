@@ -4,3 +4,10 @@ ravynOS.xcodeproj
 /build
 .DS_Store
 /.vscode
+# Build intermediates / backup artifacts
+*.o
+.depend.*
+*.bak*
+*.orig
+__pycache__/
+*.pyc

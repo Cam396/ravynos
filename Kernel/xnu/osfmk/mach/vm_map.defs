@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 /* 
@@ -96,7 +101,7 @@ subsystem
  *      the one specified are allocated, the call returns KERN_NO_SPACE.]
  */
 routine vm_region(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm_address_t;
         out     size            : vm_size_t;
 		flavor		: vm_region_flavor_t;
@@ -182,7 +187,7 @@ routine vm_inherit(
  *	protection on the specified range must permit reading.]
  */
 routine PREFIX(vm_read) (
-		target_task	: vm_map_t;
+		target_task	: vm_map_read_t;
 		address		: vm_address_t;
 		size		: vm_size_t;
 	out	data		: pointer_t);
@@ -192,7 +197,7 @@ routine PREFIX(vm_read) (
  * ranges within target address space.
  */
 routine vm_read_list(
-		target_task 	: vm_map_t;
+		target_task 	: vm_map_read_t;
 	inout	data_list   	: vm_read_entry_t;
 		count		: natural_t);
 
@@ -233,7 +238,7 @@ routine vm_copy(
  *	must permit reading.]
  */
 routine vm_read_overwrite(
-		target_task	: vm_map_t;
+		target_task	: vm_map_read_t;
 		address		: vm_address_t;
 		size		: vm_size_t;
 		data		: vm_address_t;
@@ -361,7 +366,7 @@ routine mach_make_memory_entry(
  *      address space.  If a page is mapped return ref and dirty info.
  */
 routine vm_map_page_query(
-                target_map      :vm_map_t;
+                target_map      :vm_map_read_t;
                 offset          :vm_offset_t;
         out     disposition     :integer_t;
         out     ref_count       :integer_t);
@@ -403,7 +408,7 @@ skip; /* was vm_region_object_create */
  *	address space.
  */
 routine vm_region_recurse(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm_address_t;
         out     size            : vm_size_t;
 	inout	nesting_depth	: natural_t;
@@ -417,7 +422,7 @@ routine vm_region_recurse(
 
 
 routine vm_region_recurse_64(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm_address_t;
         out     size            : vm_size_t;
 	inout	nesting_depth	: natural_t;
@@ -430,7 +435,7 @@ routine mach_vm_region_info_64(
 	out	objects		: vm_info_object_array_t);
 
 routine vm_region_64(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm_address_t;
         out     size            : vm_size_t;
 		flavor		: vm_region_flavor_t;

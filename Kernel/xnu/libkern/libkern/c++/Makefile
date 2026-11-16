@@ -24,6 +24,8 @@ DATAFILES = \
           OSObject.h \
           OSOrderedSet.h \
           OSPtr.h \
+          OSSharedPtr.h \
+          intrusive_shared_ptr.h \
           OSSerialize.h \
           OSSet.h \
           OSString.h \

@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995, 1997 Apple Computer, Inc. All Rights Reserved */
 /*
  * Copyright (c) 1982, 1986, 1989, 1991, 1993
@@ -129,6 +134,7 @@
 #include <kern/exc_guard.h>
 
 #include <vm/vm_protos.h>
+#include <vm/vm_shared_region.h>
 #include <os/log.h>
 
 #include <pexpert/pexpert.h>
@@ -759,6 +765,19 @@ int
 abort_with_payload(struct proc *cur_proc, struct abort_with_payload_args *args,
     __unused void *retval)
 {
+	/* Read the caller's reason while its address space is still current. */
+	char diag_reason[192] = "";
+	size_t diag_copied = 0;
+	int diag_error = 0;
+	if (args->reason_string != USER_ADDR_NULL) {
+		diag_error = copyinstr(args->reason_string, diag_reason,
+		    sizeof(diag_reason), &diag_copied);
+		diag_reason[sizeof(diag_reason) - 1] = '\0';
+	}
+	printf("RAVYN-ABORT pid=%d name=%s namespace=%u code=0x%llx payload_bytes=%u flags=0x%llx reason_error=%d reason=%s\n",
+	    cur_proc->p_pid, cur_proc->p_comm, args->reason_namespace,
+	    (unsigned long long)args->reason_code, args->payload_size,
+	    (unsigned long long)args->reason_flags, diag_error, diag_reason);
 	abort_with_payload_internal(cur_proc, args->reason_namespace,
 	    args->reason_code, args->payload, args->payload_size,
 	    args->reason_string, args->reason_flags, 0);
@@ -824,6 +843,38 @@ exit_with_reason(proc_t p, int rv, int *retval, boolean_t thread_can_terminate, 
 	struct task *task = p->task;
 	struct uthread *ut;
 	int error = 0;
+
+	if (WIFSIGNALED(rv)) {
+		printf("RAVYN-EXIT pid=%d name=%s signal=%d status=0x%x reason_namespace=%u reason_code=0x%llx\n",
+		    p->p_pid, p->p_comm, WTERMSIG(rv), rv,
+		    exit_reason ? exit_reason->osr_namespace : 0,
+		    exit_reason ? (unsigned long long)exit_reason->osr_code : 0);
+
+		/*
+		 * Preserve the actual shared-cache base and slide alongside process
+		 * crash records so host-side symbolication uses the runtime mapping.
+		 */
+		if (p == current_proc()) {
+			vm_shared_region_t shared_region = vm_shared_region_get(task);
+			if (shared_region != NULL) {
+				mach_vm_offset_t shared_cache_base_address = 0;
+				kern_return_t base_status = vm_shared_region_start_address(
+				    shared_region, &shared_cache_base_address);
+				uint32_t shared_cache_slide = vm_shared_region_get_slide(shared_region);
+				if (base_status == KERN_SUCCESS) {
+					printf("RAVYN-DYLD-CACHE pid=%d name=%s base=0x%llx slide=0x%llx preferred=0x%llx\n",
+					    p->p_pid, p->p_comm,
+					    (unsigned long long)shared_cache_base_address,
+					    (unsigned long long)shared_cache_slide,
+					    (unsigned long long)(shared_cache_base_address - shared_cache_slide));
+				} else {
+					printf("RAVYN-DYLD-CACHE pid=%d name=%s status=0x%x\n",
+					    p->p_pid, p->p_comm, base_status);
+				}
+				vm_shared_region_deallocate(shared_region);
+			}
+		}
+	}
 
 	/*
 	 * If a thread in this task has already

@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Copyright (c) 1997 Apple Inc.
  *
  */
@@ -339,6 +344,11 @@ OSRuntimeCallStructorsInSection(
 
 /*********************************************************************
 *********************************************************************/
+#if defined(__arm64__)
+extern "C" void __cxa_finalize(void *);
+extern "C" void ravyn_cxa_finalize_range(uintptr_t, uintptr_t);
+#endif
+
 kern_return_t
 OSRuntimeFinalizeCPP(
 	OSKext                   * theKext)
@@ -401,6 +411,13 @@ OSRuntimeFinalizeCPP(
 	    (void *)(kmodInfo->address + kmodInfo->size));
 
 	header = (kernel_mach_header_t *)kmodInfo->address;
+#if defined(__arm64__)
+	/* Modern Darwin ARM C++ records static destructors with __cxa_atexit. */
+	if (theKext && theKext->flags.builtin)
+		ravyn_cxa_finalize_range(kmodInfo->address, kmodInfo->address + kmodInfo->size);
+	else
+		__cxa_finalize(header);
+#endif
 	segment = firstsegfromheader(header);
 
 	for (segment = firstsegfromheader(header);
@@ -538,6 +555,9 @@ void
 OSRuntimeUnloadCPPForSegment(
 	kernel_segment_command_t * segment)
 {
+#if defined(__arm64__)
+	ravyn_cxa_finalize_range(segment->vmaddr, segment->vmaddr + segment->vmsize);
+#endif
 	OSRuntimeCallStructorsInSection(NULL, &g_kernel_kmod_info, NULL, segment,
 	    gOSStructorSectionNames[kOSSectionNamesDefault][kOSSectionNameFinalizer], 0, 0);
 }

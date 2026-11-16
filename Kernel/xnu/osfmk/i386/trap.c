@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -93,6 +98,9 @@
 #include <kern/telemetry.h>
 #endif
 #include <sys/kdebug.h>
+/* BSD process helpers, matching the existing osfmk boundary declarations. */
+extern int proc_selfpid(void);
+extern void proc_selfname(char *, int);
 #include <kperf/kperf.h>
 #include <prng/random.h>
 
@@ -107,6 +115,7 @@
 #include <mach/i386/syscall_sw.h>
 
 #include <libkern/OSDebug.h>
+#include <libkern/copyio.h>
 #include <i386/cpu_threads.h>
 #include <machine/pal_routines.h>
 
@@ -1130,6 +1139,43 @@ user_trap(
 			panic("vm_fault() KERN_FAILURE from user fault on thread %p", thread);
 		}
 
+		/* Opt-in observation only: preserve the actual failed vm_fault result
+		 * before exception handlers can obscure the first failing boundary. */
+		int ravyn_faulttrace = 0;
+		if (PE_parse_boot_argn("ravyn_faulttrace", &ravyn_faulttrace,
+		    sizeof(ravyn_faulttrace)) && ravyn_faulttrace) {
+			char fault_name[32] = {0};
+			proc_selfname(fault_name, sizeof(fault_name));
+			if (ravyn_faulttrace > 1 || !strcmp(fault_name, "WindowServer")) {
+				printf("RAVYN-USER-FAULT pid=%d name=%s kr=%d addr=0x%llx rip=0x%llx prot=0x%x err=0x%x\n",
+				    proc_selfpid(), fault_name, kret,
+				    (unsigned long long)vaddr, (unsigned long long)rip,
+				    prot, err);
+				if (is_saved_state64(saved_state)) {
+					x86_saved_state64_t *regs = saved_state64(saved_state);
+					uint64_t frame = regs->rbp;
+					printf("RAVYN-USER-FAULT-ARGS pid=%d rdi=0x%llx rsi=0x%llx rbp=0x%llx rsp=0x%llx\n",
+					    proc_selfpid(), regs->rdi, regs->rsi, frame, regs->isf.rsp);
+					for (int index = 0; index < 16; index++) {
+						uint64_t pair[2];
+						if (frame < regs->isf.rsp || frame >= 0x0000800000000000ULL || (frame & 7)) {
+							break;
+						}
+						int error = copyin((user_addr_t)frame, pair, sizeof(pair));
+						if (error) {
+							printf("RAVYN-USER-FAULT-FRAME pid=%d index=%d copy_error=%d\n", proc_selfpid(), index, error);
+							break;
+						}
+						printf("RAVYN-USER-FAULT-FRAME pid=%d index=%d pc=0x%llx\n", proc_selfpid(), index, pair[1]);
+						if (pair[0] <= frame || pair[0] - frame > 0x100000) {
+							break;
+						}
+						frame = pair[0];
+					}
+				}
+			}
+		}
+
 		/* PAL debug hook (empty on x86) */
 		pal_dbg_page_fault(thread, vaddr, kret);
 		exc = EXC_BAD_ACCESS;
@@ -1178,6 +1224,76 @@ user_trap(
 #endif
 
 	if (exc != 0) {
+		/*
+		 * Emit one focused record when PID 1 is about to be killed. This
+		 * captures the user fault address and the AP's per-CPU identity
+		 * before launchd's exit causes the initproc panic.
+		 */
+		if (is_saved_state64(saved_state) && task_pid(thread->task) == 1) {
+			x86_saved_state64_t *regs = saved_state64(saved_state);
+			kprintf("RAVYN-SMP-USER-EXC pid=1 cpu=%d phys=%d trap=0x%x err=0x%x cr2=0x%llx rip=0x%llx code=0x%llx subcode=0x%llx gs=0x%llx cdp=%p\n",
+			    cpu_number(), get_cpu_phys_number(), type, err,
+			    (unsigned long long)vaddr, (unsigned long long)rip,
+			    (unsigned long long)code, (unsigned long long)subcode,
+			    (unsigned long long)rdmsr64(MSR_IA32_GS_BASE),
+			    current_cpu_datap());
+			kprintf("RAVYN-SMP-USER-STATE pid=1 thread=%p task=%p threadmap=%p taskmap=%p usergs=0x%llx threadtls=0x%llx cpucachegs=0x%llx\n",
+			    thread, thread->task, thread->map, thread->task->map,
+			    (unsigned long long)rdmsr64(MSR_IA32_KERNEL_GS_BASE),
+			    (unsigned long long)thread->machine.cthread_self,
+			    (unsigned long long)current_cpu_datap()->cpu_uber.cu_user_gs_base);
+			if (type == T_PAGE_FAULT && kret == KERN_INVALID_ADDRESS && thread->map != (vm_map_t)0) {
+				vm_map_t fault_map = thread->map;
+				vm_map_entry_t entry = VM_MAP_ENTRY_NULL;
+				vm_map_entry_t next_entry = VM_MAP_ENTRY_NULL;
+				vm_map_entry_t pc_entry = VM_MAP_ENTRY_NULL;
+				boolean_t contains;
+				boolean_t pc_contains;
+				uint64_t entry_start = 0, entry_end = 0;
+				uint64_t next_start = 0, next_end = 0;
+				uint64_t pc_start = 0, pc_end = 0;
+				vm_map_lock_read(fault_map);
+				contains = vm_map_lookup_entry(fault_map, vaddr, &entry);
+				pc_contains = vm_map_lookup_entry(fault_map, regs->isf.rip, &pc_entry);
+				if (entry != VM_MAP_ENTRY_NULL) {
+					entry_start = entry->vme_start;
+					entry_end = entry->vme_end;
+					next_entry = entry->vme_next;
+					if (next_entry != VM_MAP_ENTRY_NULL) {
+						next_start = next_entry->vme_start;
+						next_end = next_entry->vme_end;
+					}
+				}
+				if (pc_entry != VM_MAP_ENTRY_NULL) {
+					pc_start = pc_entry->vme_start;
+					pc_end = pc_entry->vme_end;
+				}
+				vm_map_unlock_read(fault_map);
+				kprintf("RAVYN-SMP-VM-MAP pid=1 map=%p fault=0x%llx kret=0x%x contains=%d entry=%p range=[0x%llx,0x%llx) next=%p range=[0x%llx,0x%llx) pc_contains=%d pc_entry=%p pc_range=[0x%llx,0x%llx) pc_offset=0x%llx\n",
+				    fault_map, (unsigned long long)vaddr, kret, contains, entry,
+				    (unsigned long long)entry_start, (unsigned long long)entry_end, next_entry,
+				    (unsigned long long)next_start, (unsigned long long)next_end, pc_contains, pc_entry,
+				    (unsigned long long)pc_start, (unsigned long long)pc_end,
+				    (unsigned long long)(regs->isf.rip - pc_start));
+				{
+					uint8_t code_bytes[16] = { 0 };
+					int code_copy_error = copyin((user_addr_t)regs->isf.rip, code_bytes, sizeof(code_bytes));
+					kprintf("RAVYN-SMP-USER-CODE pid=1 copy_error=%d rip=0x%llx bytes=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+					    code_copy_error, (unsigned long long)regs->isf.rip,
+					    code_bytes[0], code_bytes[1], code_bytes[2], code_bytes[3],
+					    code_bytes[4], code_bytes[5], code_bytes[6], code_bytes[7],
+					    code_bytes[8], code_bytes[9], code_bytes[10], code_bytes[11],
+					    code_bytes[12], code_bytes[13], code_bytes[14], code_bytes[15]);
+				}
+			}
+			kprintf("RAVYN-SMP-USER-REGS pid=1 rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx rsp=0x%llx rbp=0x%llx rsi=0x%llx rdi=0x%llx r8=0x%llx r9=0x%llx r10=0x%llx r11=0x%llx\n",
+			    (unsigned long long)regs->rax, (unsigned long long)regs->rbx,
+			    (unsigned long long)regs->rcx, (unsigned long long)regs->rdx,
+			    (unsigned long long)regs->isf.rsp, (unsigned long long)regs->rbp,
+			    (unsigned long long)regs->rsi, (unsigned long long)regs->rdi,
+			    (unsigned long long)regs->r8, (unsigned long long)regs->r9,
+			    (unsigned long long)regs->r10, (unsigned long long)regs->r11);
+		}
 		/*
 		 * Note: Codepaths that directly return from user_trap() have pending
 		 * ASTs processed in locore

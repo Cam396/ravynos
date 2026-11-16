@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
 /*
  * Copyright (c) 1989, 1993
@@ -1142,7 +1147,17 @@ vfs_mountroot(void)
 			continue;
 		}
 
-		mp = vfs_rootmountalloc_internal(vfsp, "root_device");
+		/* IOFindBSDRoot has already resolved UUID roots to a BSD device.
+		 * Preserve that real name so userspace can update the root mount.
+		 */
+		extern char rootdevice[];
+		char root_device_path[MAXPATHLEN];
+		const char *root_mount_source = "root_device";
+		if (rootdevice[0] != '\0') {
+			snprintf(root_device_path, sizeof(root_device_path), "/dev/%s", rootdevice);
+			root_mount_source = root_device_path;
+		}
+		mp = vfs_rootmountalloc_internal(vfsp, root_mount_source);
 		mp->mnt_devvp = rootvp;
 
 		if (vfsp->vfc_mountroot) {
@@ -2103,7 +2118,10 @@ vnode_rele_internal(vnode_t vp, int fmode, int dont_reenter, int locked)
 	record_vp(vp, 1);
 #endif
 	vp->v_lflag &= ~VL_NEEDINACTIVE;
-	vnode_unlock(vp);
+	if (UBCINFOEXISTS(vp))
+		ubc_cs_free_and_vnode_unlock(vp);
+	else
+		vnode_unlock(vp);
 
 	VNOP_INACTIVE(vp, vfs_context_current());
 
@@ -4879,7 +4897,10 @@ retry:
 	}
 	if ((vp->v_lflag & (VL_DEAD | VL_NEEDINACTIVE)) == VL_NEEDINACTIVE) {
 		vp->v_lflag &= ~VL_NEEDINACTIVE;
-		vnode_unlock(vp);
+		if (UBCINFOEXISTS(vp))
+			ubc_cs_free_and_vnode_unlock(vp);
+		else
+			vnode_unlock(vp);
 
 		VNOP_INACTIVE(vp, ctx);
 
@@ -6846,18 +6867,47 @@ vn_authorize_mkdir(vnode_t dvp, struct componentname *cnp, struct vnode_attr *va
 #pragma unused(vap)
 #endif
 	int error;
+	proc_t p = vfs_context_proc(ctx);
+	int ravyn_trace = p != NULL && !strcmp(p->p_comm, "logd") &&
+	    cnp != NULL && cnp->cn_nameptr != NULL &&
+	    cnp->cn_namelen == 8 && !strncmp(cnp->cn_nameptr, "timesync", 8);
 
 	if (reserved != NULL) {
 		panic("reserved not NULL in vn_authorize_mkdir()");
 	}
 
+	if (ravyn_trace) {
+		char parent_path[256];
+		int parent_path_len = sizeof(parent_path);
+		int parent_path_error;
+
+		parent_path[0] = 0;
+		parent_path_error = vn_getpath(dvp, parent_path, &parent_path_len);
+		if (parent_path_error != 0) {
+			parent_path[0] = 0;
+		}
+		printf("RAVYN-MKDIR-TRACE stage=begin pid=%d uid=%d gid=%d path=%s parent=%s patherr=%d mnton=%s mntflag=0x%x%c",
+		    p->p_pid, (int)kauth_cred_getuid(vfs_context_ucred(ctx)),
+		    (int)kauth_cred_getgid(vfs_context_ucred(ctx)),
+		    cnp->cn_pnbuf != NULL ? cnp->cn_pnbuf : "(null)",
+		    parent_path, parent_path_error,
+		    dvp->v_mount != NULL ? dvp->v_mount->mnt_vfsstat.f_mntonname : "(null)",
+		    dvp->v_mount != NULL ? dvp->v_mount->mnt_flag : 0, 10);
+	}
+
 	/* XXX A hack for now, to make shadow files work */
 	if (cnp->cn_ndp == NULL) {
+		if (ravyn_trace) {
+			printf("RAVYN-MKDIR-TRACE stage=shadow-bypass error=0%c", 10);
+		}
 		return 0;
 	}
 
 	if (vnode_compound_mkdir_available(dvp)) {
 		error = lookup_validate_creation_path(cnp->cn_ndp);
+		if (ravyn_trace) {
+			printf("RAVYN-MKDIR-TRACE stage=lookup-validate error=%d%c", error, 10);
+		}
 		if (error) {
 			goto out;
 		}
@@ -6866,17 +6916,27 @@ vn_authorize_mkdir(vnode_t dvp, struct componentname *cnp, struct vnode_attr *va
 #if CONFIG_MACF
 	error = mac_vnode_check_create(ctx,
 	    dvp, cnp, vap);
+	if (ravyn_trace) {
+		printf("RAVYN-MKDIR-TRACE stage=mac-create error=%d%c", error, 10);
+	}
 	if (error) {
 		goto out;
 	}
 #endif
 
 	/* authorize addition of a directory to the parent */
-	if ((error = vnode_authorize(dvp, NULL, KAUTH_VNODE_ADD_SUBDIRECTORY, ctx)) != 0) {
+	error = vnode_authorize(dvp, NULL, KAUTH_VNODE_ADD_SUBDIRECTORY, ctx);
+	if (ravyn_trace) {
+		printf("RAVYN-MKDIR-TRACE stage=vnode-authorize error=%d%c", error, 10);
+	}
+	if (error != 0) {
 		goto out;
 	}
 
 out:
+	if (ravyn_trace) {
+		printf("RAVYN-MKDIR-TRACE stage=authorize-result error=%d%c", error, 10);
+	}
 	return error;
 }
 
@@ -7047,7 +7107,12 @@ vnode_attr_authorize_dir_clone(struct vnode_attr *vap, kauth_action_t action,
 int
 vnode_authorize(vnode_t vp, vnode_t dvp, kauth_action_t action, vfs_context_t ctx)
 {
-	int     error, result;
+	int     error, result, raw_result, final_result;
+	proc_t p = vfs_context_proc(ctx);
+	int ravyn_trace = p != NULL && !strcmp(p->p_comm, "logd") &&
+	    (action & KAUTH_VNODE_ADD_SUBDIRECTORY) != 0 && vp != NULL &&
+	    vp->v_name != NULL && !strncmp(vp->v_name, "diagnostics", 11) &&
+	    vp->v_name[11] == 0;
 
 	/*
 	 * We can't authorize against a dead vnode; allow all operations through so that
@@ -7060,14 +7125,26 @@ vnode_authorize(vnode_t vp, vnode_t dvp, kauth_action_t action, vfs_context_t ct
 	error = 0;
 	result = kauth_authorize_action(vnode_scope, vfs_context_ucred(ctx), action,
 	    (uintptr_t)ctx, (uintptr_t)vp, (uintptr_t)dvp, (uintptr_t)&error);
+	raw_result = result;
 	if (result == EPERM) {          /* traditional behaviour */
 		result = EACCES;
 	}
 	/* did the lower layers give a better error return? */
 	if ((result != 0) && (error != 0)) {
-		return error;
+		final_result = error;
+	} else {
+		final_result = result;
 	}
-	return result;
+	if (ravyn_trace) {
+		printf("RAVYN-VNODE-AUTH pid=%d uid=%d gid=%d action=0x%x node=%s mnton=%s mntflag=0x%x raw=%d detail=%d mapped=%d returned=%d%c",
+		    p->p_pid, (int)kauth_cred_getuid(vfs_context_ucred(ctx)),
+		    (int)kauth_cred_getgid(vfs_context_ucred(ctx)), action,
+		    vp->v_name,
+		    vp->v_mount != NULL ? vp->v_mount->mnt_vfsstat.f_mntonname : "(null)",
+		    vp->v_mount != NULL ? vp->v_mount->mnt_flag : 0,
+		    raw_result, error, result, final_result, 10);
+	}
+	return final_result;
 }
 
 /*

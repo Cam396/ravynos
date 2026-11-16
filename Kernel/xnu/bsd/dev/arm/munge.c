@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*
  * For arm32 ABI where 64-bit types are aligned to even registers and
@@ -507,6 +512,23 @@ munge_wwwwwl(const void *regs, void *args)
 		return 0;
 	}
 }
+
+int
+munge_wwwwllww(const void *regs, void *args)
+{
+	if (REGS_TO_STYLE(regs) == kDirect) {
+		return marshal_no_pad(regs, args, 10);
+	} else {
+		DECLARE_AND_CAST(regs, args, ss, uu_args);
+		int error = munge_wwwwl(regs, args); // wwwwl
+		if (error) {
+			return error;
+		}
+		return copyin(ss->sp + ARG_SP_BYTE_OFFSET, // lww
+		           uu_args + 6, 4 * sizeof(uint32_t));
+	}
+}
+
 
 int
 munge_wwwwwlww(const void *regs, void *args)

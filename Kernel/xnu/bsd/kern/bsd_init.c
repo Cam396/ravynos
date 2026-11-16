@@ -64,6 +64,11 @@
  *
  *	@(#)init_main.c	8.16 (Berkeley) 5/14/95
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*
  *
@@ -87,6 +92,7 @@
 #include <sys/kauth.h>
 #include <sys/systm.h>
 #include <sys/vnode_internal.h>
+#include <sys/vnode.h>
 #include <sys/conf.h>
 #include <sys/buf_internal.h>
 #include <sys/clist.h>
@@ -457,6 +463,58 @@ bsd_early_init(void)
  * of the uu_context.vc_ucred field so that the uthread structure can be
  * used like any other.
  */
+
+#if CONFIG_FIRMLINKS
+static void
+ravyn_register_private_path_alias(vfs_context_t ctx)
+{
+    vnode_t source = NULLVP;
+    vnode_t target = NULLVP;
+    char before[MAXPATHLEN] = "";
+    char after[MAXPATHLEN] = "";
+    int source_type = -1;
+    int target_type = -1;
+    int source_error = vnode_lookup("/private", VNODE_LOOKUP_NOFOLLOW,
+        &source, ctx);
+    int target_error = 0;
+    int before_error = 0;
+    int set_error = 0;
+    int after_error = 0;
+    int pathlen;
+
+    if (source_error == 0) {
+        target_error = vnode_lookup("/System/Volumes/Data/private", 0,
+            &target, ctx);
+    }
+    if (source_error == 0 && target_error == 0) {
+        source_type = vnode_vtype(source);
+        target_type = vnode_vtype(target);
+        pathlen = sizeof(before);
+        before_error = vn_getpath(target, before, &pathlen);
+        if (source_type != VLNK || target_type != VDIR) {
+            set_error = EINVAL;
+        } else {
+            set_error = vnode_setasfirmlink(source, target);
+        }
+        if (set_error == 0) {
+            pathlen = sizeof(after);
+            after_error = vn_getpath(target, after, &pathlen);
+        }
+    }
+    printf("RAVYN-PRIVATE-ALIAS source_error=%d target_error=%d source_type=%d target_type=%d same_mount=%d before_error=%d before=%s set_error=%d after_error=%d after=%s\n",
+        source_error, target_error, source_type, target_type,
+        source != NULLVP && target != NULLVP &&
+        vnode_mount(source) == vnode_mount(target),
+        before_error, before, set_error, after_error, after);
+
+    if (target != NULLVP) {
+        vnode_put(target);
+    }
+    if (source != NULLVP) {
+        vnode_put(source);
+    }
+}
+#endif
 
 void
 bsd_init(void)
@@ -1012,6 +1070,10 @@ bsd_init(void)
 	(void)vnode_ref(rootvnode);
 	(void)vnode_put(rootvnode);
 	filedesc0.fd_cdir = rootvnode;
+
+#if CONFIG_FIRMLINKS
+    ravyn_register_private_path_alias((vfs_context_t)&context);
+#endif
 
 #if CONFIG_NETBOOT
 	if (netboot) {

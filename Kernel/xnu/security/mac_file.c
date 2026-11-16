@@ -176,7 +176,9 @@ mac_file_check_set(struct ucred *cred, struct fileglob *fg, char *buf,
 {
 	int error;
 
-	MAC_CHECK(file_check_set, cred, fg, buf, buflen);
+	if (buflen < 0) return EINVAL;
+	MAC_CHECK_ABI(file_check_set, (cred, fg, buf, buflen),
+	    (cred, fg, buf, (size_t)buflen), 1, 1);
 	return error;
 }
 

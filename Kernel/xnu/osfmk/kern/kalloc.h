@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -63,6 +68,7 @@
 #include <mach/boolean.h>
 #include <sys/cdefs.h>
 #include <mach/vm_types.h>
+#include <kern/zalloc.h>
 
 __BEGIN_DECLS
 
@@ -81,6 +87,24 @@ kalloc_size(
 extern vm_size_t
 kfree_addr(
 	void                             * addr);
+
+/* External Monterey KPIs use opaque, unprocessed type descriptors. */
+struct kalloc_type_view;
+typedef struct kalloc_type_view *kalloc_type_view_t;
+extern void *kalloc_data_external(vm_size_t size, zalloc_flags_t flags);
+extern void kfree_data_external(void *address, vm_size_t size);
+extern void *kalloc_type_impl_external(kalloc_type_view_t view, zalloc_flags_t flags);
+extern void kfree_type_impl_external(kalloc_type_view_t view, void *address);
+extern void *OSObject_typed_operator_new(kalloc_type_view_t view, vm_size_t size);
+extern void OSObject_typed_operator_delete(kalloc_type_view_t view, void *address, vm_size_t size);
+/* Private common backend: flags are masked to the external KPI contract. */
+extern void *ravyn_kalloc_flags(vm_size_t size, zalloc_flags_t flags);
+extern vm_size_t ravyn_kalloc_type_size(kalloc_type_view_t view);
+
+/* Private isolated data-heap backend used by modern IOKit allocation APIs. */
+extern void *ravyn_kalloc_data(vm_size_t size, boolean_t zero);
+extern void ravyn_kfree_data(void *address, vm_size_t size);
+extern boolean_t ravyn_kalloc_is_data(void *address);
 
 extern vm_size_t
 kalloc_bucket_size(

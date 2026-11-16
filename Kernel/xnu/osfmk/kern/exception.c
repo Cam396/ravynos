@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -79,6 +84,7 @@
 #include <kern/counters.h>
 #include <kern/ipc_tt.h>
 #include <kern/task.h>
+#include <kern/task_ident.h>
 #include <kern/thread.h>
 #include <kern/processor.h>
 #include <kern/sched.h>
@@ -97,6 +103,7 @@ bool panic_on_exception_triage = false;
 unsigned long c_thr_exc_raise = 0;
 unsigned long c_thr_exc_raise_state = 0;
 unsigned long c_thr_exc_raise_state_id = 0;
+unsigned long c_thr_exc_raise_identity_token = 0;
 unsigned long c_tsk_exc_raise = 0;
 unsigned long c_tsk_exc_raise_state = 0;
 unsigned long c_tsk_exc_raise_state_id = 0;
@@ -179,6 +186,7 @@ exception_deliver(
 	kern_return_t           kr;
 	task_t task;
 	ipc_port_t thread_port = IPC_PORT_NULL, task_port = IPC_PORT_NULL;
+	ipc_port_t task_token_port = IPC_PORT_NULL;
 
 	/*
 	 *  Save work if we are terminating.
@@ -256,7 +264,7 @@ exception_deliver(
 	}
 #endif
 
-	if (behavior != EXCEPTION_STATE) {
+	if (behavior != EXCEPTION_STATE && behavior != EXCEPTION_IDENTITY_PROTECTED) {
 		task_reference(task);
 		task_port = convert_task_to_port(task);
 		/* task ref consumed */
@@ -264,6 +272,19 @@ exception_deliver(
 		thread_port = convert_thread_to_port(thread);
 		/* thread ref consumed */
 	}
+
+    if (behavior == EXCEPTION_IDENTITY_PROTECTED) {
+        task_id_token_t token = TASK_ID_TOKEN_NULL;
+        /* Keep allocation/lifetime failures honest and try the next handler.
+         * The existing token backend explicitly rejects unsupported corpses. */
+        kr = task_create_identity_token(task, &token);
+        if (kr != KERN_SUCCESS) goto out_release_right;
+        task_token_port = convert_task_id_token_to_port(token); /* consumes token */
+        if (!IP_VALID(task_token_port)) {
+            kr = KERN_RESOURCE_SHORTAGE;
+            goto out_release_right;
+        }
+    }
 
 	switch (behavior) {
 	case EXCEPTION_STATE: {
@@ -325,6 +346,16 @@ exception_deliver(
 
 		goto out_release_right;
 
+    case EXCEPTION_IDENTITY_PROTECTED:
+        ++c_thr_exc_raise_identity_token;
+        if (!code64) {
+            kr = KERN_INVALID_ARGUMENT; /* registration rejects this combination */
+            goto out_release_right;
+        }
+        kr = mach_exception_raise_identity_protected(exc_port, thread->thread_id,
+            task_token_port, exception, code, codeCnt);
+        goto out_release_right;
+
 	case EXCEPTION_STATE_IDENTITY: {
 		mach_msg_type_number_t state_cnt;
 		thread_state_data_t state;
@@ -377,6 +408,8 @@ exception_deliver(
 	}/* switch */
 
 out_release_right:
+
+	if (IP_VALID(task_token_port)) ipc_port_release_send(task_token_port);
 
 	if (task_port) {
 		ipc_port_release_send(task_port);

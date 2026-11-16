@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 /* 
@@ -136,7 +141,7 @@ thread_get_state_to_user(
 #else
 thread_get_state(
 #endif
-		target_act	: thread_act_t;
+		target_act	: thread_read_t;
 		flavor		: thread_state_flavor_t;
 	out	old_state	: thread_state_t, CountInOut);
 
@@ -164,14 +169,14 @@ thread_set_state(
  *	for its task is also zero.
  */
 routine	thread_suspend(
-		target_act	: thread_act_t);
+		target_act	: thread_read_t);
 
 /*
  *	Decrement the suspend count for the target thread,
  *	if that count is not already zero.
  */
 routine	thread_resume(
-		target_act	: thread_act_t);
+		target_act	: thread_read_t);
 
 /*
  *	Cause any user or meta- instructions currently being
@@ -214,7 +219,12 @@ thread_depress_abort(
  *	Returns the current value of the selected special port
  *	associated with the target thread.
  */
-routine thread_get_special_port(
+routine
+#ifdef KERNEL_SERVER
+thread_get_special_port_from_user(
+#else
+thread_get_special_port(
+#endif
 		thr_act		: thread_act_t;
 		which_port	: int;
 	out	special_port	: mach_port_t);

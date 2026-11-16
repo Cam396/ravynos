@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  *	File:	ubc.h
  *	Author:	Umesh Vaishampayan [umeshv@apple.com]
  *		05-Aug-1999	umeshv	Created.
@@ -124,6 +129,7 @@ struct cs_blob {
 	/* The following two will be replaced by the csb_signer_type. */
 	unsigned int    csb_platform_binary:1;
 	unsigned int    csb_platform_path:1;
+	uint32_t        csb_macho_platform; /* parsed LC_BUILD_VERSION; zero if unspecified */
 
 };
 
@@ -165,6 +171,7 @@ struct ubc_info {
 #define UI_MAPBUSY      0x00000020      /* vnode is being mapped or unmapped */
 #define UI_MAPWAITING   0x00000040      /* someone waiting for UI_MAPBUSY */
 #define UI_MAPPEDWRITE  0x00000080      /* it's mapped with PROT_WRITE */
+#define UI_CSBLOBINVALID 0x00000100     /* signatures invalidated by a writable open */
 
 /*
  * exported primitives for loadable file systems.
@@ -205,6 +212,8 @@ int UBCINFOEXISTS(const struct vnode *);
 /* code signing */
 struct cs_blob;
 int     ubc_cs_blob_add(vnode_t, cpu_type_t, off_t, vm_address_t *, vm_size_t, struct image_params *, int, struct cs_blob **);
+int ubc_cs_blob_add_platform(vnode_t, cpu_type_t, off_t, vm_address_t *, vm_size_t, struct image_params *, int, struct cs_blob **, uint32_t);
+void ubc_cs_free_and_vnode_unlock(vnode_t);
 int     ubc_cs_sigpup_add(vnode_t, vm_address_t, vm_size_t);
 struct cs_blob *ubc_get_cs_blobs(vnode_t);
 void    ubc_get_cs_mtime(vnode_t, struct timespec *);

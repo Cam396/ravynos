@@ -1,3 +1,6 @@
+#include <IOKit/IOPlatformExpert.h>
+#include <pexpert/pexpert.h>
+#include <pexpert/i386/boot.h>
 /*
  * Copyright (c) 1998-2002 Apple Computer, Inc. All rights reserved.
  *
@@ -18,6 +21,11 @@
  * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
+ */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
  */
 /*
  * Copyright (c) 1998 Apple Computer, Inc.  All rights reserved. 
@@ -182,9 +190,99 @@ bool AppleI386PCI::start( IOService * provider )
 bool AppleI386PCI::configure( IOService * provider )
 {
     bool ok;
+    int efiAudit = 0, vmwareWindows = 0;
+    bool windowsReady = false;
+    PE_parse_boot_argn("ravyn_pci_efi_audit", &efiAudit, sizeof(efiAudit));
+    PE_parse_boot_argn("ravyn_pci_vmware_windows", &vmwareWindows, sizeof(vmwareWindows));
+    if ((efiAudit || vmwareWindows) && PE_state.bootArgs)
+    {
+        const boot_args *args = (const boot_args *)PE_state.bootArgs;
+        uint32_t stride = args->MemoryMapDescriptorSize;
+        uint32_t bytes = args->MemoryMapSize;
+        if (args->MemoryMap && stride >= sizeof(EfiMemoryRange)
+            && bytes <= 1024 * 1024 && !(bytes % stride))
+        {
+            IOMemoryDescriptor *descriptor = IOMemoryDescriptor::withPhysicalAddress(
+                args->MemoryMap, bytes, kIODirectionIn);
+            IOMemoryMap *mapping = descriptor ? descriptor->map(kIOMapReadOnly) : NULL;
+            const uint8_t *map = mapping ? (const uint8_t *)mapping->getVirtualAddress() : NULL;
+            uint64_t lowRamEnd = 0, limit = 0x100000000ULL;
+            for (uint32_t offset = 0; map && offset < bytes; offset += stride)
+            {
+                const EfiMemoryRange *entry = (const EfiMemoryRange *)(map + offset);
+                if (efiAudit) kprintf("RAVYN-PCI-EFI type=%u start=0x%llx pages=0x%llx\n",
+                        entry->Type, entry->PhysicalStart, entry->NumberOfPages);
+                if (entry->NumberOfPages > (~0ULL >> 12)) continue;
+                uint64_t length = entry->NumberOfPages << 12;
+                if (entry->PhysicalStart > ~0ULL - length) continue;
+                uint64_t end = entry->PhysicalStart + length;
+                bool ram = (entry->Type >= 1 && entry->Type <= 7)
+                        || entry->Type == 9 || entry->Type == 10;
+                if (ram && end <= 0x100000000ULL && end > lowRamEnd) lowRamEnd = end;
+            }
+            if (vmwareWindows && map)
+            {
+                uint32_t a, b, c, d;
+                __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                                 : "a"(0x40000000U), "c"(0));
+                char vendor[13] = {0};
+                bcopy(&b, vendor, 4); bcopy(&c, vendor + 4, 4); bcopy(&d, vendor + 8, 4);
+                bool vmware = !memcmp(vendor, "VMwareVMware", 12);
+                bool foundApic = false;
+                OSIterator *it = getPlatform()->getChildIterator(gIOServicePlane);
+                IORegistryEntry *child;
+                while (it && (child = (IORegistryEntry *)it->getNextObject()))
+                {
+                    OSNumber *physical = OSDynamicCast(OSNumber, child->getProperty("Physical Address"));
+                    if (physical && physical->unsigned64BitValue() >= lowRamEnd)
+                    {
+                        foundApic = true;
+                        if (physical->unsigned64BitValue() < limit) limit = physical->unsigned64BitValue();
+                    }
+                }
+                if (it) it->release();
+                // Stay below every firmware-described region above RAM as well.
+                for (uint32_t offset = 0; offset < bytes; offset += stride)
+                {
+                    const EfiMemoryRange *entry = (const EfiMemoryRange *)(map + offset);
+                    if (entry->NumberOfPages && entry->PhysicalStart >= lowRamEnd
+                        && entry->PhysicalStart < limit) limit = entry->PhysicalStart;
+                }
+                bool clear = vmware && foundApic && lowRamEnd >= 0x10000000ULL
+                    && !(lowRamEnd & 0xfffff) && !(limit & 0xfffff)
+                    && lowRamEnd < limit && limit <= 0x100000000ULL;
+                for (uint32_t offset = 0; clear && offset < bytes; offset += stride)
+                {
+                    const EfiMemoryRange *entry = (const EfiMemoryRange *)(map + offset);
+                    if (entry->NumberOfPages > (~0ULL >> 12)) { clear = false; break; }
+                    uint64_t length = entry->NumberOfPages << 12;
+                    if (entry->PhysicalStart > ~0ULL - length) { clear = false; break; }
+                    if (length && entry->PhysicalStart < limit
+                        && entry->PhysicalStart + length > lowRamEnd) clear = false;
+                }
+                if (clear)
+                {
+                    bool memory = addBridgeMemoryRange(lowRamEnd, limit - lowRamEnd, true);
+                    // VMware's legacy x86 platform reserves the low 4KiB I/O area.
+                    bool ports = addBridgeIORange(0x1000, 0xf000);
+                    windowsReady = memory && ports;
+                    kprintf("RAVYN-PCI-HOST-WINDOW base=0x%llx end=0x%llx mem=%d io=%d\n",
+                            lowRamEnd, limit, memory, ports);
+                }
+                else kprintf("RAVYN-PCI-HOST-WINDOW rejected vmware=%d apic=%d base=0x%llx end=0x%llx\n",
+                             vmware, foundApic, lowRamEnd, limit);
+            }
+            if (mapping) mapping->release();
+            if (descriptor) descriptor->release();
+        }
+    }
 
-    ok = addBridgeMemoryRange( 0x80000000, 0x7f000000, true );
-    ok = addBridgeIORange( 0, 0x10000 );
+    if (vmwareWindows && !windowsReady) return false;
+    if (!vmwareWindows)
+    {
+        ok = addBridgeMemoryRange( 0x80000000, 0x7f000000, true );
+        ok = addBridgeIORange( 0, 0x10000 );
+    }
 
     return( super::configure( provider ));
 }

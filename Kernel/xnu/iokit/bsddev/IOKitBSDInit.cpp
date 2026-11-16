@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #include <IOKit/IOBSD.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
@@ -38,6 +43,12 @@ extern "C" {
 #include <pexpert/pexpert.h>
 #include <kern/clock.h>
 #include <kern/debug.h>
+#include <kern/thread.h>
+#include <sys/stackshot.h>
+
+extern kern_return_t kern_stack_snapshot_internal(int, void *, size_t, boolean_t);
+extern void *kernel_stackshot_buf;
+extern int kernel_stackshot_buf_size;
 #include <mach/machine.h>
 #include <uuid/uuid.h>
 #include <sys/vnode_internal.h>
@@ -382,6 +393,54 @@ IOOFPathMatching( const char * path, char * buf, int maxLen )
 static int didRam = 0;
 enum { kMaxPathBuf = 512, kMaxBootVar = 128 };
 
+// Explicit diagnostic profile only: capture kernel waits before a userspace
+// observer can run. Existing stackshot code freezes CPUs and records real stacks;
+// the bounded serial hex stream is decoded and integrity-checked on the host.
+static void
+ravynRootStackshot(void *, wait_result_t)
+{
+    IOSleep(15000);
+    stackshot_config_t config = {};
+    config.sc_pid = -1;
+    config.sc_flags = STACKSHOT_SAVE_IN_KERNEL_BUFFER | STACKSHOT_KCDATA_FORMAT |
+        STACKSHOT_SAVE_LOADINFO | STACKSHOT_THREAD_WAITINFO | STACKSHOT_NO_IO_STATS;
+    kern_return_t result = kern_stack_snapshot_internal(STACKSHOT_CONFIG_TYPE,
+        &config, sizeof(config), FALSE);
+    kprintf("RAVYN_ROOT_STACKSHOT result=%d bytes=%d\n", result, kernel_stackshot_buf_size);
+    if (result == KERN_SUCCESS && kernel_stackshot_buf &&
+        kernel_stackshot_buf_size > 0 && kernel_stackshot_buf_size <= 1024 * 1024) {
+        const unsigned char *bytes = static_cast<const unsigned char *>(kernel_stackshot_buf);
+        unsigned hash = 2166136261U;
+        for (int i = 0; i < kernel_stackshot_buf_size; ++i)
+            hash = (hash ^ bytes[i]) * 16777619U;
+        kprintf("RAVYN_KCDATA_BEGIN bytes=%d fnv=%08x\n", kernel_stackshot_buf_size, hash);
+        static const char hex[] = "0123456789abcdef";
+        for (int offset = 0; offset < kernel_stackshot_buf_size; offset += 48) {
+            char line[97];
+            int count = kernel_stackshot_buf_size - offset;
+            if (count > 48) count = 48;
+            for (int i = 0; i < count; ++i) {
+                line[i * 2] = hex[bytes[offset + i] >> 4];
+                line[i * 2 + 1] = hex[bytes[offset + i] & 15];
+            }
+            line[count * 2] = 0;
+            kprintf("RAVYN_KCDATA:%08x:%s\n", offset, line);
+        }
+        kprintf("RAVYN_KCDATA_END\n");
+    }
+    thread_terminate(current_thread());
+}
+
+// Optional shutdown diagnosis uses the same bounded, verified capture path.
+extern "C" void
+ravynScheduleShutdownStackshot(void)
+{
+    thread_t worker = THREAD_NULL;
+    kern_return_t result = kernel_thread_start(ravynRootStackshot, NULL, &worker);
+    kprintf("RAVYN_SHUTDOWN_STACKSHOT worker=%d\n", result);
+    if (result == KERN_SUCCESS) thread_deallocate(worker);
+}
+
 kern_return_t
 IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
     dev_t * root, u_int32_t * oflags )
@@ -409,6 +468,18 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 
 	int xchar, dchar;
 
+    static bool diagnosticStarted = false;
+    unsigned diagnostic = 0;
+    if (!diagnosticStarted &&
+        PE_parse_boot_argn("ravyn-root-stackshot", &diagnostic, sizeof(diagnostic)) && diagnostic) {
+        thread_t worker = THREAD_NULL;
+        kern_return_t result = kernel_thread_start(ravynRootStackshot, NULL, &worker);
+        kprintf("RAVYN_ROOT_STACKSHOT worker=%d\n", result);
+        if (result == KERN_SUCCESS) {
+            diagnosticStarted = true;
+            thread_deallocate(worker);
+        }
+    }
     kprintf("IOFindBSDRoot: looking for root device\n");
 	// stall here for anyone matching on the IOBSD resource to finish (filesystems)
 	matching = IOService::serviceMatching(gIOResourcesKey);
@@ -496,6 +567,30 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 				ramdParms = (uintptr_t *)data->getBytesNoCopy();        /* Point to the ram disk base and size */
 				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, ramdParms[1] >> 12, 0);        /* Initialize it and pass back the device number */
 			}
+#if defined(__arm64__)
+            // Opt-in recovery volumes, reserved by the loader beside the root.
+            // They use the existing memory block driver and genuine HFS mounts.
+            int recoveryHFS = 0;
+            if (PE_parse_boot_argn("ravyn_recovery_hfs", &recoveryHFS,
+                                  sizeof(recoveryHFS)) && recoveryHFS) {
+                const char *names[] = { "RAMDisk-Data", "RAMDisk-Volumes" };
+                for (unsigned i = 0; i < 2; i++) {
+                    OSData *disk = OSDynamicCast(OSData, regEntry->getProperty(names[i]));
+                    if (!disk || disk->getLength() != 2 * sizeof(uint64_t)) {
+                        panic("Recovery HFS: missing or malformed %s", names[i]);
+                    }
+                    const uint64_t *range = (const uint64_t *)disk->getBytesNoCopy();
+                    if (!range[1] || ((range[0] | range[1]) & PAGE_MASK) ||
+                        range[1] > UINT32_MAX || range[0] + range[1] < range[0]) {
+                        panic("Recovery HFS: invalid range for %s", names[i]);
+                    }
+                    if (mdevadd(i + 1, ml_static_ptovirt(range[0]) >> 12,
+                                (unsigned)(range[1] >> 12), 0) == NODEV) {
+                        panic("Recovery HFS: cannot create %s", names[i]);
+                    }
+                }
+            }
+#endif
 			regEntry->release();                                                            /* Toss the entry */
 		}
 	}

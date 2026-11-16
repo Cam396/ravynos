@@ -35,6 +35,7 @@ coalition_create_syscall(user_addr_t cidp, uint32_t flags)
 	int type = COALITION_CREATE_FLAGS_GET_TYPE(flags);
 	int role = COALITION_CREATE_FLAGS_GET_ROLE(flags);
 	boolean_t privileged = !!(flags & COALITION_CREATE_FLAGS_PRIVILEGED);
+	boolean_t efficient = !!(flags & COALITION_CREATE_FLAGS_EFFICIENT);
 
 	if ((flags & (~COALITION_CREATE_FLAGS_MASK)) != 0) {
 		return EINVAL;
@@ -48,6 +49,9 @@ coalition_create_syscall(user_addr_t cidp, uint32_t flags)
 		/* for now, the only kr is KERN_RESOURCE_SHORTAGE */
 		error = ENOMEM;
 		goto out;
+	}
+	if (efficient) {
+		coalition_set_efficient(coal);
 	}
 
 	cid = coalition_id(coal);

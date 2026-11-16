@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 /*
@@ -813,6 +818,12 @@ thread_inspect_deallocate(
 	thread_inspect_t                thread_inspect)
 {
 	return thread_deallocate((thread_t)thread_inspect);
+}
+
+void
+thread_read_deallocate(thread_read_t thread_read)
+{
+	return thread_deallocate((thread_t)thread_read);
 }
 
 /*

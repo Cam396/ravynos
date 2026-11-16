@@ -1,6 +1,11 @@
 /*
  * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <kern/task.h>
 #include <kern/thread.h>
@@ -29,6 +34,7 @@
 #include <sys/bitstring.h>
 
 #include <security/audit/audit.h>
+#include <pexpert/pexpert.h>
 
 #if CONFIG_MACF
 #include <security/mac_framework.h>
@@ -73,6 +79,51 @@ __XNU_PRIVATE_EXTERN	int             syscalls_log[SYS_MAXSYSCALL];
 #define code_is_kdebug_trace(code) (((code) == SYS_kdebug_trace) ||   \
                                     ((code) == SYS_kdebug_trace64) || \
                                     ((code) == SYS_kdebug_trace_string))
+
+#if defined(__arm64__) && (DEBUG || DEVELOPMENT)
+static void
+ravyn_recovery_prefs_trace(struct proc *proc, struct uthread *uthread, unsigned code, int error)
+{
+    int enabled = 0;
+    if (strcmp(proc->p_comm, "pmset") != 0 && strcmp(proc->p_comm, "cfprefsd") != 0 &&
+        strcmp(proc->p_comm, "security") != 0 && strcmp(proc->p_comm, "securityd") != 0 &&
+        strcmp(proc->p_comm, "recoveryosd") != 0 && strcmp(proc->p_comm, "opendirectoryd") != 0 &&
+        strcmp(proc->p_comm, "WindowServer") != 0) {
+        return;
+    }
+    if (!PE_parse_boot_argn("ravyn_recovery_prefs_trace", &enabled, sizeof(enabled)) || !enabled) {
+        return;
+    }
+    int path_arg = -1;
+    switch (code) {
+    case SYS_open: case SYS_open_nocancel: case SYS_access: case SYS_stat64:
+    case SYS_lstat64: case SYS_readlink: case SYS_rename: case SYS_unlink:
+    case SYS_mkdir: case SYS_rmdir:
+    case SYS_setattrlist: case SYS_getattrlist: case SYS_setxattr: case SYS___mac_syscall:
+        path_arg = 0;
+        break;
+    case SYS_openat: case SYS_openat_nocancel: case SYS_renameat: case SYS_renameatx_np:
+    case SYS_mkdirat: case SYS_fstatat64:
+        path_arg = 1;
+        break;
+    default:
+        if (error == 0 && code != SYS_gethostuuid && code != SYS_fsync && code != SYS_fcntl) {
+            return;
+        }
+        break;
+    }
+    char path[240] = "-";
+    size_t copied = 0;
+    if (path_arg >= 0 && copyinstr((user_addr_t)uthread->uu_arg[path_arg],
+        path, sizeof(path), &copied) != 0) {
+        path[0] = '?';
+        path[1] = 0;
+    }
+    printf("RAVYN-PREFS pid=%d comm=%s call=%u error=%d result=%d arg1=0x%llx path=%s\n",
+        proc_pid(proc), proc->p_comm, code, error, uthread->uu_rval[0],
+        (unsigned long long)uthread->uu_arg[1], path);
+}
+#endif
 
 /*
  * Function:	unix_syscall
@@ -176,6 +227,10 @@ unix_syscall(
 #if CONFIG_MACF
 skip_syscall:
 #endif /* CONFIG_MACF */
+#if defined(__arm64__) && (DEBUG || DEVELOPMENT)
+	ravyn_recovery_prefs_trace(proc, uthread, code, error);
+#endif
+
 
 	unix_syscall_kprintf("code %d, error %d, results %x, %x (pid %d - %s, tid %lld)\n", code, error, 
 			uthread->uu_rval[0], uthread->uu_rval[1], 

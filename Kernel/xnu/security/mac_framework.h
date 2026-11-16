@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /*-
  * Copyright (c) 1999-2002 Robert N. M. Watson
  * Copyright (c) 2001-2005 Networks Associates Technology, Inc.
@@ -259,6 +264,27 @@ int     mac_mbuf_label_init(struct mbuf *m, int flag);
 void    mac_mbuf_tag_copy(struct m_tag *m, struct m_tag *mtag);
 void    mac_mbuf_tag_destroy(struct m_tag *mtag);
 int     mac_mbuf_tag_init(struct m_tag *, int how);
+/* Full-argument internal MAC ABI bridge; legacy entry points remain. */
+int mac_socket_check_ioctl_v80(struct ucred *cred, struct socket *so, unsigned long cmd);
+int mac_mount_check_fsctl_v80(vfs_context_t ctx, struct mount *mp, u_long cmd);
+int mac_vnode_check_ioctl_v80(vfs_context_t ctx, struct vnode *vp, u_long cmd);
+int mac_vnode_check_getattrlist_v80(vfs_context_t ctx, struct vnode *vp, struct attrlist *alist, uint64_t options);
+int mac_vnode_check_searchfs_v80(vfs_context_t ctx, struct vnode *vp, struct attrlist *returnattrs, struct attrlist *alist);
+
+int mac_vnode_check_copyfile(vfs_context_t ctx, struct vnode *dvp,
+    struct vnode *tvp, struct vnode *fvp, struct componentname *cnp,
+    mode_t mode, int flags);
+
+int mac_mount_check_quotactl(vfs_context_t ctx, struct mount *mp, int cmd, int id);
+
+int mac_necp_check_open(proc_t proc, int flags);
+
+int mac_necp_check_client_action(proc_t proc, struct fileglob *fg, uint32_t action);
+
+int mac_proc_check_memorystatus_control(proc_t proc, uint32_t command, pid_t pid);
+
+int mac_iokit_check_open_service(kauth_cred_t cred, io_object_t service, unsigned int user_client_type);
+
 int     mac_mount_check_fsctl(vfs_context_t ctx, struct mount *mp,
     unsigned int cmd);
 int     mac_mount_check_getattr(vfs_context_t ctx, struct mount *mp,
@@ -350,6 +376,8 @@ int     mac_proc_check_fork(proc_t proc);
 int     mac_proc_check_suspend_resume(proc_t proc, int sr);
 int     mac_proc_check_get_task_name(kauth_cred_t cred, struct proc *p);
 int     mac_proc_check_get_task(kauth_cred_t cred, struct proc *p);
+int     mac_proc_check_get_task_v80(kauth_cred_t cred, struct proc *p, unsigned int flavor);
+int     mac_proc_check_task_id_token_get_task(struct proc *, unsigned int);
 int     mac_proc_check_expose_task(kauth_cred_t cred, struct proc *p);
 int     mac_proc_check_inherit_ipc_ports(struct proc *p, struct vnode *cur_vp, off_t cur_offset, struct vnode *img_vp, off_t img_offset, struct vnode *scriptvp);
 int     mac_proc_check_getaudit(proc_t proc);

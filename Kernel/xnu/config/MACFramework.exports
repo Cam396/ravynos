@@ -1,4 +1,6 @@
 _mac_policy_register
+_mac_policy_register_v80
+_mac_schedule_telemetry
 _mac_policy_unregister
 _mac_vnop_getxattr
 _mac_vnop_setxattr

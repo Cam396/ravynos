@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -701,7 +706,7 @@ mach_msg_overwrite(
 		max_trailer->msgh_trailer_type = MACH_MSG_TRAILER_FORMAT_0;
 		max_trailer->msgh_trailer_size = MACH_MSG_TRAILER_MINIMUM_SIZE;
 
-		mr = ipc_kmsg_copyin(kmsg, space, map, override, &option);
+		mr = ipc_kmsg_copyin(kmsg, space, map, override, &option, FALSE, FALSE);
 
 		if (mr != MACH_MSG_SUCCESS) {
 			ipc_kmsg_free(kmsg);

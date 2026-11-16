@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
 /*
  * Copyright (c) 1982, 1986, 1993
@@ -499,6 +504,7 @@ struct proc_rlimit_control_wakeupmon {
 #define IOPOL_TYPE_VFS_ATIME_UPDATES 2
 #define IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES 3
 #define IOPOL_TYPE_VFS_STATFS_NO_DATA_VOLUME 4
+#define IOPOL_TYPE_VFS_ALLOW_LOW_SPACE_WRITES 9
 
 /* scope */
 #define IOPOL_SCOPE_PROCESS   0
@@ -531,6 +537,9 @@ struct proc_rlimit_control_wakeupmon {
 
 #define IOPOL_VFS_STATFS_NO_DATA_VOLUME_DEFAULT 0
 #define IOPOL_VFS_STATFS_FORCE_NO_DATA_VOLUME   1
+
+#define IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_OFF 0
+#define IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_ON  1
 
 #ifdef PRIVATE
 /*

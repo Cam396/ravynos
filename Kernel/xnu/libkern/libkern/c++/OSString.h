@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* IOString.h created by rsulack on Wed 17-Sep-1997 */
 /* IOString.h converted to C++ by gvdl on Fri 1998-10-30 */
 
@@ -32,6 +37,7 @@
 #define _OS_OSSTRING_H
 
 #include <libkern/c++/OSObject.h>
+#include <libkern/c++/OSSharedPtr.h>
 #include <libkern/c++/OSPtr.h>
 
 class OSData;
@@ -168,6 +174,7 @@ public:
  * <code>NULL</code> on failure.
  */
 	static OSStringPtr withCString(const char * cString);
+	static OSSharedPtr<OSString> withCString(const char *cString, size_t maxLength);
 
 
 /*!

@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -118,8 +123,8 @@
  * If we are in the kernel, then pick up the kernel definitions for
  * the basic mach types.
  */
-typedef struct task                     *task_t, *task_name_t, *task_inspect_t, *task_suspension_token_t;
-typedef struct thread           *thread_t, *thread_act_t, *thread_inspect_t;
+typedef struct task                     *task_t, *task_name_t, *task_read_t, *task_inspect_t, *task_suspension_token_t;
+typedef struct thread           *thread_t, *thread_act_t, *thread_inspect_t, *thread_read_t;
 typedef struct ipc_space                *ipc_space_t, *ipc_space_inspect_t;
 typedef struct coalition                *coalition_t;
 typedef struct host                     *host_t;
@@ -135,6 +140,7 @@ typedef struct clock                    *clock_serv_t;
 typedef struct clock                    *clock_ctrl_t;
 typedef struct arcade_register          *arcade_register_t;
 typedef struct suid_cred               *suid_cred_t;
+typedef struct task_id_token           *task_id_token_t;
 
 /*
  * OBSOLETE: lock_set interfaces are obsolete.
@@ -170,11 +176,13 @@ __END_DECLS
  */
 typedef mach_port_t             task_t;
 typedef mach_port_t             task_name_t;
+typedef mach_port_t             task_read_t;
 typedef mach_port_t             task_inspect_t;
 typedef mach_port_t             task_suspension_token_t;
 typedef mach_port_t             thread_t;
 typedef mach_port_t             thread_act_t;
 typedef mach_port_t             thread_inspect_t;
+typedef mach_port_t             thread_read_t;
 typedef mach_port_t             ipc_space_t;
 typedef mach_port_t             ipc_space_inspect_t;
 typedef mach_port_t             coalition_t;
@@ -192,6 +200,7 @@ typedef mach_port_t             clock_serv_t;
 typedef mach_port_t             clock_ctrl_t;
 typedef mach_port_t             arcade_register_t;
 typedef mach_port_t             suid_cred_t;
+typedef mach_port_t             task_id_token_t;
 
 #endif  /* KERNEL */
 
@@ -267,9 +276,11 @@ typedef uint32_t suid_cred_uid_t;
 #ifdef KERNEL
 #define TASK_NULL               ((task_t) NULL)
 #define TASK_NAME_NULL          ((task_name_t) NULL)
+#define TASK_READ_NULL          ((task_read_t) NULL)
 #define TASK_INSPECT_NULL               ((task_inspect_t) NULL)
 #define THREAD_NULL             ((thread_t) NULL)
 #define THREAD_INSPECT_NULL     ((thread_inspect_t)NULL)
+#define THREAD_READ_NULL        ((thread_read_t)NULL)
 #define TID_NULL                ((uint64_t) NULL)
 #define THR_ACT_NULL            ((thread_act_t) NULL)
 #define IPC_SPACE_NULL          ((ipc_space_t) NULL)
@@ -291,9 +302,11 @@ typedef uint32_t suid_cred_uid_t;
 #else
 #define TASK_NULL               ((task_t) 0)
 #define TASK_NAME_NULL          ((task_name_t) 0)
+#define TASK_READ_NULL          ((task_read_t) 0)
 #define TASK_INSPECT_NULL               ((task_inspect_t) 0)
 #define THREAD_NULL             ((thread_t) 0)
 #define THREAD_INSPECT_NULL     ((thread_inspect_t) 0)
+#define THREAD_READ_NULL        ((thread_read_t) 0)
 #define TID_NULL                ((uint64_t) 0)
 #define THR_ACT_NULL            ((thread_act_t) 0)
 #define IPC_SPACE_NULL          ((ipc_space_t) 0)
@@ -330,5 +343,16 @@ typedef char                    *labelstr_t;
  *	before mach/{std,mach}_types.{defs,h} were set up.
  */
 #include <mach/std_types.h>
+
+/* Monterey task-port capability flavors (task_access RPC ABI). */
+#define TASK_FLAVOR_CONTROL 0
+#define TASK_FLAVOR_READ 1
+#define TASK_FLAVOR_INSPECT 2
+#define TASK_FLAVOR_NAME 3
+
+/* Thread-port capability flavors used by task_threads. */
+#define THREAD_FLAVOR_CONTROL 0
+#define THREAD_FLAVOR_READ 1
+#define THREAD_FLAVOR_INSPECT 2
 
 #endif  /* _MACH_MACH_TYPES_H_ */

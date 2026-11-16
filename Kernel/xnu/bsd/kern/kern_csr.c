@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <pexpert/pexpert.h>
 #include <sys/csr.h>
@@ -33,6 +38,43 @@
 #include <sys/systm.h>
 #include <sys/types.h>
 
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+#include <libkern/section_keywords.h>
+#include <pexpert/device_tree.h>
+
+/* Recovery can configure the device. Other CSR exceptions require a
+ * platform-specific local boot policy. The generic loader supplies none. */
+static SECURITY_READ_ONLY_LATE(csr_config_t) csr_arm_config;
+
+void
+csr_init(void)
+{
+	static const char recovery[] = "recoveryos";
+	DTEntry chosen;
+	void *environment = NULL;
+	unsigned int size = 0;
+
+	if (DTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+	    DTGetProperty(chosen, "osenvironment", &environment, &size) == kSuccess &&
+	    size == sizeof(recovery) && environment != NULL &&
+	    memcmp(environment, recovery, sizeof(recovery)) == 0) {
+		csr_arm_config = CSR_ALLOW_DEVICE_CONFIGURATION;
+	}
+}
+
+int
+csr_get_active_config(csr_config_t *config)
+{
+	*config = csr_arm_config;
+	return 0;
+}
+
+int
+csr_check(csr_config_t mask)
+{
+	return (mask & ~csr_arm_config) ? EPERM : 0;
+}
+#else
 /* enable enforcement by default */
 static int csr_allow_all = 0;
 
@@ -92,6 +134,8 @@ csr_check(csr_config_t mask)
 
 	return ret;
 }
+
+#endif
 
 /*
  * Syscall stubs

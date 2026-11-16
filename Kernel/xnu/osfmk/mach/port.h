@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -356,9 +361,13 @@ typedef struct mach_port_info_ext {
 	uint32_t                reserved[6];
 } mach_port_info_ext_t;
 
+typedef struct mach_port_guard_info {
+	uint64_t                mpgi_guard;      /* guard value */
+} mach_port_guard_info_t;
+
 typedef integer_t *mach_port_info_t;            /* varying array of natural_t */
 
-/* Flavors for mach_port_get/set_attributes() */
+/* Flavors for mach_port_get/set/assert_attributes() */
 typedef int     mach_port_flavor_t;
 #define MACH_PORT_LIMITS_INFO           1       /* uses mach_port_limits_t */
 #define MACH_PORT_RECEIVE_STATUS        2       /* uses mach_port_status_t */
@@ -367,12 +376,15 @@ typedef int     mach_port_flavor_t;
 #define MACH_PORT_IMPORTANCE_RECEIVER   5       /* indicates recieve right accepts priority donation */
 #define MACH_PORT_DENAP_RECEIVER        6       /* indicates receive right accepts de-nap donation */
 #define MACH_PORT_INFO_EXT              7       /* uses mach_port_info_ext_t */
+#define MACH_PORT_GUARD_INFO            8       /* asserts a strict receive-right guard */
 
 #define MACH_PORT_LIMITS_INFO_COUNT     ((natural_t) \
 	(sizeof(mach_port_limits_t)/sizeof(natural_t)))
 #define MACH_PORT_RECEIVE_STATUS_COUNT  ((natural_t) \
 	(sizeof(mach_port_status_t)/sizeof(natural_t)))
 #define MACH_PORT_DNREQUESTS_SIZE_COUNT 1
+#define MACH_PORT_GUARD_INFO_COUNT      ((natural_t) \
+	(sizeof(mach_port_guard_info_t)/sizeof(natural_t)))
 #define MACH_PORT_INFO_EXT_COUNT        ((natural_t) \
 	(sizeof(mach_port_info_ext_t)/sizeof(natural_t)))
 /*
@@ -402,6 +414,17 @@ typedef struct mach_port_qos {
 #define MPO_STRICT              0x20    /* Apply strict guarding for port */
 #define MPO_DENAP_RECEIVER      0x40    /* Mark the port as App de-nap receiver */
 #define MPO_IMMOVABLE_RECEIVE   0x80    /* Mark the port as immovable; protected by the guard context */
+#define MPO_FILTER_MSG          0x100   /* Apply Sandbox message filtering to this port */
+#define MPO_TG_BLOCK_TRACKING   0x200   /* Render-server blocking classification; performance callouts absent on Intel */
+#define MPO_SERVICE_PORT        0x400   /* Create a launchd service port with Sandbox label */
+#define MPO_CONNECTION_PORT     0x800   /* Derive a connection label from a service port */
+
+#define MACH_SERVICE_PORT_INFO_STRING_NAME_MAX_BUF_LEN 255
+typedef struct mach_service_port_info {
+    char                    mspi_string_name[MACH_SERVICE_PORT_INFO_STRING_NAME_MAX_BUF_LEN];
+    uint8_t                 mspi_domain_type;
+} mach_service_port_info_data_t;
+typedef struct mach_service_port_info *mach_service_port_info_t;
 /*
  * Structure to define optional attributes for a newly
  * constructed port.
@@ -409,7 +432,17 @@ typedef struct mach_port_qos {
 typedef struct mach_port_options {
 	uint32_t                flags;          /* Flags defining attributes for port */
 	mach_port_limits_t      mpl;            /* Message queue limit for port */
-	uint64_t                reserved[2];    /* Reserved */
+	union {
+		uint64_t                reserved[2];
+		mach_port_name_t        work_interval_port;
+#if KERNEL
+		uint32_t                service_port_info32;
+		uint64_t                service_port_info64;
+#else
+		mach_service_port_info_t service_port_info;
+#endif
+		mach_port_name_t        service_port_name;
+	};
 }mach_port_options_t;
 
 typedef mach_port_options_t *mach_port_options_ptr_t;
@@ -430,6 +463,7 @@ enum mach_port_guard_exception_codes {
 	kGUARD_EXC_INCORRECT_GUARD           = 1u << 4,
 	kGUARD_EXC_IMMOVABLE                 = 1u << 5,
 	kGUARD_EXC_STRICT_REPLY              = 1u << 6,
+	kGUARD_EXC_MSG_FILTERED               = 1u << 7,
 	/* start of [optionally] non-fatal guards */
 	kGUARD_EXC_INVALID_RIGHT         = 1u << 8,
 	kGUARD_EXC_INVALID_NAME          = 1u << 9,
@@ -446,7 +480,7 @@ enum mach_port_guard_exception_codes {
 	kGUARD_EXC_RCV_GUARDED_DESC      = 1u << 20, /* should never be fatal; for development only */
 };
 
-#define MAX_FATAL_kGUARD_EXC_CODE (1u << 6)
+#define MAX_FATAL_kGUARD_EXC_CODE (1u << 7)
 
 /*
  * These flags are used as bits in the subcode of kGUARD_EXC_STRICT_REPLY exceptions.

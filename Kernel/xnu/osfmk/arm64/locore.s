@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <machine/asm.h>
 #include <arm64/machine_routines_asm.h>
@@ -744,6 +749,13 @@ fleh_dispatch64:
 	cmp		x23, #(PSR64_MODE_EL0)
 	bne		1f
 
+#if defined(ARM64_BOARD_CONFIG_BCM2837)
+	/* Preserve the context pointer and FLEH address across the key switch. */
+	stp		x0, x1, [sp, #-16]!
+	bl		EXT(ravyn_kernel_pauth_enter)
+	ldp		x0, x1, [sp], #16
+#endif
+
 	mov		x2, #0
 	mov		x3, #0
 	mov		x4, #0
@@ -1116,6 +1128,14 @@ exception_return:
 exception_return_unint:
 	mrs		x3, TPIDR_EL1					// Load thread pointer
 exception_return_unint_tpidr_x3:
+#if defined(ARM64_BOARD_CONFIG_BCM2837)
+    ldr w0, [x21, SS64_CPSR]
+    tbnz w0, PSR64_MODE_EL_SHIFT, Lravyn_pauth_skip_el1
+    mov x0, x3
+    bl EXT(ravyn_user_pauth_restore)
+    mrs x3, TPIDR_EL1
+Lravyn_pauth_skip_el1:
+#endif
 	mov		sp, x21						// Reload the pcb pointer
 
 	/* ARM64_TODO Reserve x18 until we decide what to do with it */

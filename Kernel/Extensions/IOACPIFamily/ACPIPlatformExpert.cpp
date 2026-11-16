@@ -22,10 +22,16 @@
  * project, and extensively modified by Zoe Knox in 2026 to support ravynOS.
  * This notice is included in support of clause 2.2(b) of the License.
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <IOKit/IOLib.h>
 #include <IOKit/assert.h>
 #include <IOKit/system.h>
+#include <IOKit/rtc/IORTCController.h>
 #include <IOKit/IORegistryEntry.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/platform/ApplePlatformExpert.h>
@@ -44,39 +50,56 @@ extern "C" {
 
 #include "ACPIPlatformExpert.h"
 
+#ifndef RAVYN_APPLE_ACPI_INTERFACE
 const IORegistryPlane * gIOACPIPlane           = 0;
 const OSSymbol *        gIOACPIHardwareIDKey   = 0;
 const OSSymbol *        gIOACPIUniqueIDKey     = 0;
 const OSSymbol *        gIOACPIAddressKey      = 0;
 const OSSymbol *        gIOACPIDeviceStatusKey = 0;
+#endif
+
+extern "C" {
+uint32_t ml_get_apicid(uint32_t cpu);
+kern_return_t ml_processor_register(cpu_id_t cpu_id, uint32_t lapic_id,
+    processor_t *processor_out, boolean_t boot_cpu, boolean_t start);
+}
 
 extern "C" void lapic_end_of_interrupt( void );
 
 static IOLock *ResourceLock;
 
-static IOACPIPlatformExpertGlobals gIOACPIPlatformExpertGlobals;
+// Published before a device is allowed to enable its MSI vector. The PCI
+// controller is retained by the platform and lives for the boot lifetime.
+static IOInterruptController *gRavynMsiController;
 
-IOACPIPlatformExpertGlobals::IOACPIPlatformExpertGlobals()
+
+static RavynACPIPlatformGlobals gRavynACPIPlatformGlobals;
+
+RavynACPIPlatformGlobals::RavynACPIPlatformGlobals()
 {
+#ifndef RAVYN_APPLE_ACPI_INTERFACE
     gIOACPIPlane           = IORegistryEntry::makePlane("IOACPIPlane");
     gIOACPIHardwareIDKey   = OSSymbol::withCString("_HID");
     gIOACPIUniqueIDKey     = OSSymbol::withCString("_UID");
     gIOACPIAddressKey      = OSSymbol::withCString("_ADR");
     gIOACPIDeviceStatusKey = OSSymbol::withCString("_STA");
+#endif
     ResourceLock = IOLockAlloc();
     isInitialized = false;
 }
 
-IOACPIPlatformExpertGlobals::~IOACPIPlatformExpertGlobals()
+RavynACPIPlatformGlobals::~RavynACPIPlatformGlobals()
 {
     if (ResourceLock) IOLockFree(ResourceLock);
+#ifndef RAVYN_APPLE_ACPI_INTERFACE
     if (gIOACPIHardwareIDKey)   gIOACPIHardwareIDKey->release();
     if (gIOACPIUniqueIDKey)     gIOACPIUniqueIDKey->release();
     if (gIOACPIAddressKey)      gIOACPIAddressKey->release();
     if (gIOACPIDeviceStatusKey) gIOACPIDeviceStatusKey->release();
+#endif
 }
 
-bool IOACPIPlatformExpertGlobals::isValid() const
+bool RavynACPIPlatformGlobals::isValid() const
 {
     return ( gIOACPIPlane           &&
              gIOACPIHardwareIDKey   &&
@@ -87,17 +110,17 @@ bool IOACPIPlatformExpertGlobals::isValid() const
 
 #pragma mark -
 
-#define super IOPlatformExpert
+#define super RAVYN_ACPI_SUPER
 
-OSDefineMetaClassAndStructors(ACPIPlatformExpert, IOPlatformExpert);
+OSDefineMetaClassAndStructors(ACPIPlatformExpert, RAVYN_ACPI_SUPER);
 
 IOService *ACPIPlatformExpert::probe(IOService *provider, SInt32 *score) {
-    if (gIOACPIPlatformExpertGlobals.isInitialized) {
+    if (gRavynACPIPlatformGlobals.isInitialized) {
         PE_Log("ACPIPlatformExpert::probe called more than once!");
         return NULL;
     }
     if (score != 0) *score = 10000;
-    gIOACPIPlatformExpertGlobals.isInitialized = true;
+    gRavynACPIPlatformGlobals.isInitialized = true;
     return this;
 }
 
@@ -111,6 +134,35 @@ bool ACPIPlatformExpert::init(OSDictionary *properties) {
     return true;
 }
 
+// The calendar reads time through the platform expert, not directly through
+// the IORTC resource. Forward to the actual RTC published by its driver.
+// IOKitInitializeTime waits for that resource before calendar initialization.
+static IORTC *copyPlatformRTC(void)
+{
+    IOService *resources = IOService::getResourceService();
+    OSObject *object = resources ? resources->copyProperty("IORTC") : NULL;
+    IORTC *rtc = OSDynamicCast(IORTC, object);
+    if (!rtc && object) object->release();
+    return rtc; // Owns the copyProperty reference when the cast succeeded.
+}
+
+long ACPIPlatformExpert::getGMTTimeOfDay(void)
+{
+    IORTC *rtc = copyPlatformRTC();
+    if (!rtc) return 0;
+    long seconds = rtc->getGMTTimeOfDay();
+    rtc->release();
+    return seconds;
+}
+
+void ACPIPlatformExpert::setGMTTimeOfDay(long seconds)
+{
+    IORTC *rtc = copyPlatformRTC();
+    if (!rtc) return;
+    rtc->setGMTTimeOfDay(seconds);
+    rtc->release();
+}
+
 IOService *
 ACPIPlatformExpert::createNub(OSDictionary *dict) {
     IOService *nub = 0;
@@ -122,7 +174,7 @@ ACPIPlatformExpert::createNub(OSDictionary *dict) {
         if (nub)
             nub->init(dict);
     } else {
-        nub = super::createNub(dict);
+        nub = IOPlatformExpert::createNub(dict);
     }
     if (osName)
         nub->setName(osName->getCStringNoCopy());
@@ -149,19 +201,138 @@ bool ACPIPlatformExpert::start(IOService *provider) {
     PE_halt_restart = handlePEHaltRestart;
     registerService();
 
-    /* Start all the cpus */
-    OSIterator * iter = OSCollectionIterator::withCollection(cpuArray);
-    if (iter) {
-        OSObject * obj = NULL;
-        while ((obj = iter->getNextObject())) {
+    /*
+     * Register the complete ACPI CPU set with XNU before starting any AP.
+     * IOCPU objects alone are not machine-layer processors: without this
+     * two-phase registration XNU's LAPIC map and scheduler remain single-CPU.
+     */
+    const unsigned int cpuCount = cpuArray ? cpuArray->getCount() : 0;
+    if (cpuCount == 0) {
+        IOLog("ACPIPlatformExpert: MADT contains no usable CPUs\n");
+        return false;
+    }
 
+    ACPICPU *bootCPU = NULL;
+    OSIterator * iter = OSCollectionIterator::withCollection(cpuArray);
+    if (!iter) return false;
+    OSObject * obj = NULL;
+    while ((obj = iter->getNextObject())) {
+        ACPICPU *cpu = OSDynamicCast(ACPICPU, obj);
+        if (!cpu || !cpu->start(this)) {
+            iter->release();
+            return false;
+        }
+        cpu->assignLogicalNumber(0xFFFFFFFFu);
+        if (cpu->getAPICID() == ml_get_apicid(0)) bootCPU = cpu;
+    }
+    iter->release();
+    IOLog("ACPIPlatformExpert: prepared %u CPU services, BSP APIC ID %u\n",
+        cpuCount, ml_get_apicid(0));
+    if (!bootCPU) {
+        IOLog("ACPIPlatformExpert: MADT does not describe BSP APIC ID %u\n",
+            ml_get_apicid(0));
+        return false;
+    }
+
+    /* XNU requires the bootstrap processor to occupy registration slot zero. */
+    IOLog("ACPIPlatformExpert: registering BSP APIC ID %u\n",
+        bootCPU->getAPICID());
+    if (!bootCPU->registerMachineCPU(false)) return false;
+    iter = OSCollectionIterator::withCollection(cpuArray);
+    if (!iter) return false;
+    while ((obj = iter->getNextObject())) {
+        ACPICPU *cpu = OSDynamicCast(ACPICPU, obj);
+        if (cpu != bootCPU && !cpu->registerMachineCPU(false)) {
+            iter->release();
+            return false;
+        }
+    }
+    iter->release();
+    IOLog("ACPIPlatformExpert: registered all %u CPU(s) with XNU\n",
+        cpuCount);
+
+    /* Initializing a CPU interrupt controller releases ml_get_max_cpus().
+     * Only do this after registration has populated logical/physical_cpu_max;
+     * otherwise commpage publishes one CPU and libdispatch allocates a single
+     * per-CPU magazine while the scheduler later runs threads on the APs.
+     */
+    iter = OSCollectionIterator::withCollection(cpuArray);
+    if (!iter) return false;
+    while ((obj = iter->getNextObject())) {
+        ACPICPU *cpu = OSDynamicCast(ACPICPU, obj);
+        if (!cpu || !cpu->startCommon()) {
+            iter->release();
+            return false;
+        }
+    }
+    iter->release();
+
+    /* Match XNU's topology order: BSP first, then APIC ID ascending. */
+    bootCPU->assignLogicalNumber(0);
+    for (uint32_t logical = 1; logical < cpuCount; ++logical) {
+        ACPICPU *next = NULL;
+        uint32_t lowestAPIC = 0xFFFFFFFFu;
+        iter = OSCollectionIterator::withCollection(cpuArray);
+        if (!iter) return false;
+        while ((obj = iter->getNextObject())) {
             ACPICPU *cpu = OSDynamicCast(ACPICPU, obj);
-            if (!cpu)
-                return false;
-            cpu->start(this);
+            if (cpu && cpu != bootCPU &&
+                cpu->getCPUNumber() == 0xFFFFFFFFu &&
+                cpu->getAPICID() < lowestAPIC) {
+                next = cpu;
+                lowestAPIC = cpu->getAPICID();
+            }
         }
         iter->release();
+        if (!next) {
+            IOLog("ACPIPlatformExpert: could not order CPU %u of %u\n",
+                logical, cpuCount);
+            return false;
+        }
+        next->assignLogicalNumber(logical);
     }
+
+    /* Install per-CPU interrupt callbacks once logical CPU numbers are known. */
+    iter = OSCollectionIterator::withCollection(cpuArray);
+    if (!iter) return false;
+    while ((obj = iter->getNextObject())) {
+        ACPICPU *cpu = OSDynamicCast(ACPICPU, obj);
+        if (!cpu) {
+            iter->release();
+            return false;
+        }
+        cpu->prepareInterrupts();
+    }
+    iter->release();
+
+    /* The BSP also needs the second registration phase. It finalizes XNU's
+     * topology and binds cpu_datap(0)->cpu_id to its IOCPU before invoking
+     * cpu_machine_init() on the existing boot context. It does not send an IPI
+     * or reset the BSP. This phase is required even on a one-CPU machine. */
+    if (!bootCPU->registerMachineCPU(true)) return false;
+    IOLog("ACPIPlatformExpert: BSP APIC ID %u bound on boot context\n",
+        bootCPU->getAPICID());
+    for (uint32_t logical = 1; logical < cpuCount; ++logical) {
+        ACPICPU *next = NULL;
+        iter = OSCollectionIterator::withCollection(cpuArray);
+        if (!iter) return false;
+        while ((obj = iter->getNextObject())) {
+            ACPICPU *cpu = OSDynamicCast(ACPICPU, obj);
+            if (cpu && cpu->getCPUNumber() == logical) {
+                next = cpu;
+                break;
+            }
+        }
+        iter->release();
+        if (!next) return false;
+        IOLog("ACPIPlatformExpert: starting logical CPU %u APIC ID %u\n",
+            logical, next->getAPICID());
+        if (!next->registerMachineCPU(true)) return false;
+        IOLog("ACPIPlatformExpert: logical CPU %u APIC ID %u is running\n",
+            logical, next->getAPICID());
+    }
+    IOLog("ACPIPlatformExpert: XNU registered and started %u CPU(s)\n",
+        cpuCount);
 
     struct nubEntry_t {
         const char *name;
@@ -319,7 +490,7 @@ bool ACPIPlatformExpert::configure(IOService *provider) {
     OSDictionary *dict;
     IOService * nub;
 
-    if (!super::configure(provider)) return false;
+    if (!IOPlatformExpert::configure(provider)) return false;
 
     parseACPI(this);
     return true;
@@ -451,6 +622,34 @@ bool ACPIPlatformExpert::setNubInterruptVector(IOService *nub, UInt32 vector) {
 
 IOReturn ACPIPlatformExpert::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction, void *param1, void *param2, void *param3, void *param4) {
     bool ok;
+
+    if (functionName->isEqualTo("GetMessagedInterruptAddress")) {
+        int enabled = 0;
+        PE_parse_boot_argn("ravyn_pci_msi", &enabled, sizeof(enabled));
+        if (!enabled) return kIOReturnUnsupported;
+        uintptr_t vector = (uintptr_t)param3;
+        if (!param1 || param2 || !param4 || vector < 0x70 || vector >= 0xff
+            || (vector >= 0x7f && vector < 0x83)
+            || (vector >= 0xd0 && vector < 0xe0)) return kIOReturnBadArgument;
+        uint32_t apicID = ml_get_apicid(0);
+        uint32_t lo, hi;
+        __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x1b));
+        if (!(lo & 0x800) || hi || (lo & 0xfffff000U) != 0xfee00000U
+            || apicID > 255) return kIOReturnUnsupported;
+        const OSSymbol *name = OSSymbol::withCString("IOPCIMessagedInterruptController");
+        if (!name) return kIOReturnNoMemory;
+        IOInterruptController *controller = lookUpInterruptController((OSSymbol *)name);
+        name->release();
+        if (!controller) return kIOReturnNotReady;
+        uint32_t *message = (uint32_t *)param4;
+        message[0] = 0xfee00000U | (apicID << 12);
+        message[1] = 0;
+        message[2] = (uint32_t)vector; // physical destination, fixed, edge-triggered
+        __atomic_store_n(&gRavynMsiController, controller, __ATOMIC_RELEASE);
+        kprintf("RAVYN-MSI-MESSAGE vector=0x%lx apic=%u address=0x%x data=0x%x\n",
+                (unsigned long)vector, apicID, message[0], message[2]);
+        return kIOReturnSuccess;
+    }
 
     if (functionName->isEqualTo("SetDeviceInterrupts")) {
         IOService *nub = (IOService *)param1;
@@ -673,13 +872,20 @@ void ACPIPlatformExpert::setupAPIC(IOService *nub) {
 }
 
 IOReturn ACPIPlatformExpert::handleInterrupt(void *refCon, IOService *nub, int source) {
+    IOInterruptController *msiController =
+        __atomic_load_n(&gRavynMsiController, __ATOMIC_ACQUIRE);
+    if (msiController && source >= 0x70 && source < 0xff) {
+        IOReturn ret = msiController->handleInterrupt(refCon, nub, source);
+        lapic_end_of_interrupt();
+        return ret;
+    }
     if (!_apic) {
         //PE_Log("No interrupt controller registered! (%p %d)", nub, source);
         OSIterator *iter = getChildIterator(gIOServicePlane);
         OSObject *obj;
         while ((obj = iter->getNextObject()) != NULL) {
             IOService *io = OSDynamicCast(IOService, obj);
-            if (io && !strcmp("io-apic@0", io->getName())) {
+            if (io && _interruptControllerName->isEqualTo(io->getName())) {
                 OSIterator *subiter = io->getChildIterator(gIOServicePlane);
                 _apic = OSDynamicCast(AppleAPICInterruptController, subiter->getNextObject());
                 subiter->release();

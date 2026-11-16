@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <vm/vm_compressor.h>
 
@@ -185,8 +190,17 @@ union c_segu {
 
 
 
-#define C_SLOT_PACK_PTR(ptr)            (((uintptr_t)ptr - (uintptr_t) KERNEL_PMAP_HEAP_RANGE_START) >> 2)
-#define C_SLOT_UNPACK_PTR(cslot)        ((uintptr_t)(cslot->c_packed_ptr << 2) + (uintptr_t) KERNEL_PMAP_HEAP_RANGE_START)
+/* BCM2837 uses 4 KiB bootstrap tables with a 16 KiB VM page size.
+ * Its zone map starts at VM_MIN_KERNEL_ADDRESS, below low globals. Use
+ * the actual zone-map base for this zone-only offset encoding. The existing
+ * startup round-trip checks validate both ends of the representable range. */
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+#define C_SLOT_POINTER_BASE ((uintptr_t)zone_map_min_address)
+#else
+#define C_SLOT_POINTER_BASE ((uintptr_t)KERNEL_PMAP_HEAP_RANGE_START)
+#endif
+#define C_SLOT_PACK_PTR(ptr)            (((uintptr_t)ptr - C_SLOT_POINTER_BASE) >> 2)
+#define C_SLOT_UNPACK_PTR(cslot)        ((uintptr_t)(cslot->c_packed_ptr << 2) + C_SLOT_POINTER_BASE)
 
 
 uint32_t        c_segment_count = 0;

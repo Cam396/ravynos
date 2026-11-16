@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /*-
  * Copyright (c) 1999, 2000, 2001, 2002 Robert N. M. Watson
  * Copyright (c) 2001 Ilmar S. Habibulin
@@ -450,8 +455,8 @@ mac_policy_initbsd(void)
 
 	for (i = 0; i <= mac_policy_list.maxindex; i++) {
 		mpc = mac_get_mpc(i);
-		if ((mpc != NULL) && (mpc->mpc_ops->mpo_policy_initbsd != NULL)) {
-			(*(mpc->mpc_ops->mpo_policy_initbsd))(mpc);
+		if ((mpc != NULL) && (mac_policy_ops_for_legacy(mpc)->mpo_policy_initbsd != NULL)) {
+			(*(mac_policy_ops_for_legacy(mpc)->mpo_policy_initbsd))(mpc);
 		}
 	}
 
@@ -665,9 +670,56 @@ mac_policy_fixup_mmd_list(struct mac_module_data *new)
 	new->base_addr = new;
 }
 
+struct mac_policy_v80_adapter {
+    struct mac_policy_conf shadow_conf;
+    struct mac_policy_ops legacy_ops;
+};
+
+static int mac_policy_register_internal(struct mac_policy_conf *,
+    mac_policy_handle_t *, void *, struct mac_policy_v80_adapter *);
+
 int
 mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
     void *xd)
+{
+    /* Only the explicit entry point can attach versioned metadata. */
+    if (mpc != NULL &&
+        (mpc->mpc_runtime_flags & MPC_RUNTIME_FLAG_RAVYN_OPS_V80)) {
+        return EINVAL;
+    }
+    return mac_policy_register_internal(mpc, handlep, xd, NULL);
+}
+
+int
+mac_policy_register_v80(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
+    void *xd)
+{
+    struct mac_policy_v80_adapter *adapter;
+    int error;
+
+    if (mpc == NULL || handlep == NULL || mpc->mpc_ops == NULL ||
+        mpc->mpc_name == NULL || mpc->mpc_fullname == NULL ||
+        mpc->mpc_labelname_count > MAC_MAX_MANAGED_NAMESPACES) {
+        return EINVAL;
+    }
+    adapter = kalloc(sizeof(*adapter));
+    if (adapter == NULL) return ENOMEM;
+    error = mac_policy_translate_v80(
+        (const struct mac_policy_ops_v80 *)mpc->mpc_ops,
+        &adapter->legacy_ops);
+    if (error == 0) {
+        bzero(&adapter->shadow_conf, sizeof(adapter->shadow_conf));
+        adapter->shadow_conf.mpc_ops = &adapter->legacy_ops;
+        error = mac_policy_register_internal(mpc, handlep, xd, adapter);
+    }
+    if (error != 0) kfree(adapter, sizeof(*adapter));
+    return error;
+}
+
+static int
+mac_policy_register_internal(struct mac_policy_conf *mpc,
+    mac_policy_handle_t *handlep, void *xd,
+    struct mac_policy_v80_adapter *adapter)
 {
 #if !CONFIG_EMBEDDED
 	struct mac_policy_list_element *tmac_policy_list_element;
@@ -750,6 +802,12 @@ mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
 		}
 	}
 
+	if (adapter != NULL && (mpc->mpc_list != NULL ||
+	    (mpc->mpc_runtime_flags & MPC_RUNTIME_FLAG_RAVYN_OPS_V80))) {
+		error = EINVAL;
+		goto out;
+	}
+
 	if (mpc->mpc_field_off != NULL) {
 		slot = ffs(mac_slot_offsets_free);
 		if (slot == 0) {
@@ -798,6 +856,10 @@ mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
 		mac_policy_list.staticmax++;
 	}
 
+	if (adapter != NULL) {
+		mpc->mpc_list = &adapter->shadow_conf;
+		mpc->mpc_runtime_flags |= MPC_RUNTIME_FLAG_RAVYN_OPS_V80;
+	}
 	mac_policy_list.entries[*handlep].mpc = mpc;
 
 	/* Update counters, etc */
@@ -808,13 +870,13 @@ mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
 
 	/* Per-policy initialization. */
 	printf("calling mpo_policy_init for %s\n", mpc->mpc_name);
-	if (mpc->mpc_ops->mpo_policy_init != NULL) {
-		(*(mpc->mpc_ops->mpo_policy_init))(mpc);
+	if (mac_policy_ops_for_legacy(mpc)->mpo_policy_init != NULL) {
+		(*(mac_policy_ops_for_legacy(mpc)->mpo_policy_init))(mpc);
 	}
 
-	if (mac_late && mpc->mpc_ops->mpo_policy_initbsd != NULL) {
+	if (mac_late && mac_policy_ops_for_legacy(mpc)->mpo_policy_initbsd != NULL) {
 		printf("calling mpo_policy_initbsd for %s\n", mpc->mpc_name);
-		(*(mpc->mpc_ops->mpo_policy_initbsd))(mpc);
+		(*(mac_policy_ops_for_legacy(mpc)->mpo_policy_initbsd))(mpc);
 	}
 
 	mac_policy_updateflags();
@@ -890,10 +952,17 @@ mac_policy_unregister(mac_policy_handle_t handle)
 		mac_slot_offsets_free |= (1 << *mpc->mpc_field_off);
 	}
 
-	if (mpc->mpc_ops->mpo_policy_destroy != NULL) {
-		(*(mpc->mpc_ops->mpo_policy_destroy))(mpc);
+	if (mac_policy_ops_for_legacy(mpc)->mpo_policy_destroy != NULL) {
+		(*(mac_policy_ops_for_legacy(mpc)->mpo_policy_destroy))(mpc);
 	}
 
+	if (mpc->mpc_runtime_flags & MPC_RUNTIME_FLAG_RAVYN_OPS_V80) {
+		struct mac_policy_v80_adapter *adapter =
+		    (struct mac_policy_v80_adapter *)mpc->mpc_list;
+		mpc->mpc_runtime_flags &= ~MPC_RUNTIME_FLAG_RAVYN_OPS_V80;
+		mpc->mpc_list = NULL;
+		kfree(adapter, sizeof(*adapter));
+	}
 	mpc->mpc_runtime_flags &= ~MPC_RUNTIME_FLAG_REGISTERED;
 	mac_policy_updateflags();
 
@@ -1028,7 +1097,7 @@ element_loop:
 				continue;
 			}
 			mpo_externalize = *(const typeof(mpo_externalize) *)
-			    ((const char *)mpc->mpc_ops + mpo_externalize_off);
+			    ((const char *)mac_policy_ops_for_legacy(mpc) + mpo_externalize_off);
 			if (mpo_externalize == NULL) {
 				continue;
 			}
@@ -1169,7 +1238,7 @@ element_loop:
 				continue;
 			}
 			mpo_internalize = *(const typeof(mpo_internalize) *)
-			    ((const char *)mpc->mpc_ops + mpo_internalize_off);
+			    ((const char *)mac_policy_ops_for_legacy(mpc) + mpo_internalize_off);
 			if (mpo_internalize == NULL) {
 				continue;
 			}
@@ -1797,6 +1866,23 @@ __mac_set_link(proc_t p, struct __mac_set_link_args *uap,
 	return mac_set_filelink(p, uap->mac_p, uap->path_p, 0);
 }
 
+static int
+mac_proc_check_mac_syscall(proc_t p, const char *target, int callnum)
+{
+	int error;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+
+	MAC_CHECK_V80(proc_check_syscall_mac, (p, target, callnum));
+
+	return error;
+}
+
 /*
  * __mac_syscall: Perform a MAC policy system call
  *
@@ -1828,6 +1914,11 @@ __mac_syscall(proc_t p, struct __mac_syscall_args *uap, int *retv __unused)
 	AUDIT_ARG(value32, uap->call);
 	AUDIT_ARG(mac_string, target);
 
+	error = mac_proc_check_mac_syscall(p, target, uap->call);
+	if (error) {
+		return error;
+	}
+
 	error = ENOPOLICY;
 
 	for (i = 0; i < mac_policy_list.staticmax; i++) {
@@ -1837,8 +1928,8 @@ __mac_syscall(proc_t p, struct __mac_syscall_args *uap, int *retv __unused)
 		}
 
 		if (strcmp(mpc->mpc_name, target) == 0 &&
-		    mpc->mpc_ops->mpo_policy_syscall != NULL) {
-			error = mpc->mpc_ops->mpo_policy_syscall(p,
+		    mac_policy_ops_for_legacy(mpc)->mpo_policy_syscall != NULL) {
+			error = mac_policy_ops_for_legacy(mpc)->mpo_policy_syscall(p,
 			    uap->call, uap->arg);
 			goto done;
 		}
@@ -1851,8 +1942,8 @@ __mac_syscall(proc_t p, struct __mac_syscall_args *uap, int *retv __unused)
 			}
 
 			if (strcmp(mpc->mpc_name, target) == 0 &&
-			    mpc->mpc_ops->mpo_policy_syscall != NULL) {
-				error = mpc->mpc_ops->mpo_policy_syscall(p,
+			    mac_policy_ops_for_legacy(mpc)->mpo_policy_syscall != NULL) {
+				error = mac_policy_ops_for_legacy(mpc)->mpo_policy_syscall(p,
 				    uap->call, uap->arg);
 				break;
 			}

@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -131,6 +136,8 @@ typedef uint32_t ast_t;
 #define AST_REBALANCE           0x100000 /* thread context switched due to rebalancing */
 #define AST_UNQUIESCE           0x200000 /* catch unquiesced processor before returning to userspace */
 
+#define AST_TELEMETRY_MACF      0x1000000 /* pinned modern MACF sample request */
+
 #define AST_NONE                0x00
 #define AST_ALL                 (~AST_NONE)
 
@@ -138,7 +145,7 @@ typedef uint32_t ast_t;
 #define AST_PREEMPTION  (AST_PREEMPT | AST_QUANTUM | AST_URGENT)
 
 #define AST_TELEMETRY_ALL (AST_TELEMETRY_USER | AST_TELEMETRY_KERNEL | \
-	        AST_TELEMETRY_PMI | AST_TELEMETRY_IO)
+	        AST_TELEMETRY_PMI | AST_TELEMETRY_IO | AST_TELEMETRY_MACF)
 
 /* Per-thread ASTs follow the thread at context-switch time. */
 #define AST_PER_THREAD  (AST_APC | AST_BSD | AST_MACF | AST_RESET_PCS | \

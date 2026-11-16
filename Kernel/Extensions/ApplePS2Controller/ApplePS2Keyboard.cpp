@@ -116,6 +116,8 @@ void ApplePS2Keyboard::stop(IOService * provider)
 void ApplePS2Keyboard::interruptOccurred(void * target, UInt8 data)
 {
     ApplePS2Keyboard * self = (ApplePS2Keyboard *)target;
+    static unsigned logged = 0;
+    if (logged++ < 8) IOLog("ApplePS2Keyboard: input byte 0x%02x\n", data);
 
     if (data == kSC_Extend) {        /* 0xE0 prefix */
         self->_extendCount = true;

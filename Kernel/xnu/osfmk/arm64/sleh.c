@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <arm/caches_internal.h>
 #include <arm/cpu_data.h>
@@ -54,6 +59,7 @@
 #include <vm/vm_kern.h>
 
 #include <sys/kdebug.h>
+extern int proc_selfpid(void);
 #include <kperf/kperf.h>
 
 #include <kern/policy_internal.h>
@@ -486,6 +492,21 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		ml_set_interrupts_enabled(TRUE);
 	}
 
+#if defined(ARM64_BOARD_CONFIG_BCM2837)
+    if (PSR64_IS_USER(get_saved_state_cpsr(state)) &&
+        class != ESR_EC_SVC_64 && class != ESR_EC_DABORT_EL0 && class != ESR_EC_IABORT_EL0) {
+        int trace_arm_trap=0;
+        if (PE_parse_boot_argn("ravyn_user_fault", &trace_arm_trap, sizeof(trace_arm_trap)) && trace_arm_trap) {
+            uint32_t instruction=0;
+            (void)copyin(get_saved_state_pc(state),&instruction,sizeof(instruction));
+            kprintf("RAVYN ARM USER TRAP: pid=%d ec=0x%x esr=0x%x pc=0x%llx lr=0x%llx op=0x%x x0=0x%llx x1=0x%llx x8=0x%llx x16=0x%llx\n",
+                proc_selfpid(),class,esr,(uint64_t)get_saved_state_pc(state),
+                (uint64_t)get_saved_state_lr(state),instruction,
+                (uint64_t)get_saved_state_reg(state,0),(uint64_t)get_saved_state_reg(state,1),
+                (uint64_t)get_saved_state_reg(state,8),(uint64_t)get_saved_state_reg(state,16));
+        }
+    }
+#endif
 	switch (class) {
 	case ESR_EC_SVC_64:
 		if (!is_saved_state64(state) || !PSR64_IS_USER(get_saved_state_cpsr(state))) {
@@ -495,6 +516,17 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		handle_svc(state);
 		break;
 
+#if defined(ARM64_BOARD_CONFIG_BCM2837)
+    case 0x1c: { /* FEAT_FPAC: failed pointer authentication. */
+        if (!is_saved_state64(state) || !PSR64_IS_USER(get_saved_state_cpsr(state)))
+            panic_with_thread_kernel_state("Kernel pointer authentication failure", state);
+        mach_exception_data_type_t codes[2] = {
+            KERN_PROTECTION_FAILURE, get_saved_state_pc(state)
+        };
+        exception_triage(EXC_BAD_ACCESS, codes, 2);
+        __builtin_unreachable();
+    }
+#endif
 	case ESR_EC_DABORT_EL0:
 		handle_abort(state, esr, far, recover, inspect_data_abort, handle_user_abort);
 		thread_exception_return();
@@ -1198,6 +1230,19 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 		exc |= EXC_PTRAUTH_BIT;
 	}
 #endif /* __has_feature(ptrauth_calls) */
+#if defined(ARM64_BOARD_CONFIG_BCM2837)
+    int trace_user_fault = 0;
+    if (PE_parse_boot_argn("ravyn_user_fault", &trace_user_fault, sizeof(trace_user_fault)) && trace_user_fault) {
+        uint64_t sctlr;
+        __asm__ volatile("mrs %0, SCTLR_EL1" : "=r"(sctlr));
+        kprintf("RAVYN ARM USER CONTROL: sctlr=0x%llx\n", sctlr);
+        kprintf("RAVYN ARM USER ABORT: pid=%d pc=0x%llx lr=0x%llx far=0x%llx esr=0x%x code=%lld\n",
+            proc_selfpid(), (uint64_t)get_saved_state_pc(state),
+            (uint64_t)get_saved_state_lr(state), (uint64_t)fault_addr, esr, codes[0]);
+        for (unsigned int reg=0; reg<10; reg++)
+            kprintf("RAVYN ARM USER REG: x%u=0x%llx\n", reg, (uint64_t)get_saved_state_reg(state,reg));
+    }
+#endif
 	exception_triage(exc, codes, numcodes);
 	__builtin_unreachable();
 }

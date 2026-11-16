@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995, 1997 Apple Computer, Inc. All Rights Reserved */
 /*-
  * Copyright (c) 1986, 1989, 1991, 1993
@@ -242,6 +247,10 @@ extern void wakeup_one(caddr_t chan);
 /* proc kpis */
 /* this routine returns the pid of the current process */
 extern int proc_selfpid(void);
+#ifdef KERNEL_PRIVATE
+extern int proc_starttime(proc_t p, struct timeval *tv);
+extern void proc_parent_audit_token(proc_t p, audit_token_t *token_out);
+#endif
 /* this routine returns the pid of the parent of the current process */
 extern int proc_selfppid(void);
 /* this routine returns the csflags of the current process */
@@ -266,6 +275,9 @@ void proc_selfname(char * buf, int size);
 
 /* find a process with a given pid. This comes with a reference which needs to be dropped by proc_rele */
 extern proc_t proc_find(int pid);
+struct proc_ident;
+/* Returns a referenced live process only if all identity fields still match. */
+extern proc_t proc_find_ident(struct proc_ident const *ident);
 /* returns a handle to current process which is referenced. The reference needs to be dropped with proc_rele */
 extern proc_t proc_self(void);
 /* releases the held reference on the process */
@@ -357,6 +369,8 @@ extern int      msleep1(void *chan, lck_mtx_t *mtx, int pri, const char *wmesg, 
 
 task_t proc_task(proc_t);
 extern int proc_pidversion(proc_t);
+extern int proc_isinitproc(proc_t);
+extern boolean_t proc_is_translated(proc_t);
 extern uint32_t proc_persona_id(proc_t);
 extern uint32_t proc_getuid(proc_t);
 extern uint32_t proc_getgid(proc_t);
@@ -401,6 +415,7 @@ extern int proc_is_forcing_hfs_case_sensitivity(proc_t);
  *  @return      Value in the same format as wait()'s output parameter.
  */
 extern int proc_exitstatus(proc_t p);
+extern bool proc_allow_low_space_writes(proc_t p);
 
 #endif /* KERNEL_PRIVATE */
 
@@ -432,8 +447,26 @@ extern vnode_t proc_getexecutablevnode(proc_t); /* Returned with iocount, use vn
 extern int networking_memstatus_callout(proc_t p, uint32_t);
 
 #define SYSCALL_MASK_UNIX 0
+#define SYSCALL_MASK_MACH 1
+#define SYSCALL_MASK_KOBJ 2
+
+#define SYSCALL_FILTER_CALLBACK_VERSION 1
+typedef int (*syscall_filter_cbfunc_t)(proc_t p, int num);
+typedef int (*kobject_filter_cbfunc_t)(proc_t p, int msgid, int idx);
+struct syscall_filter_callbacks {
+	int version;
+	const syscall_filter_cbfunc_t unix_filter_cbfunc;
+	const syscall_filter_cbfunc_t mach_filter_cbfunc;
+	const kobject_filter_cbfunc_t kobj_filter_cbfunc;
+};
+typedef struct syscall_filter_callbacks * syscall_filter_cbs_t;
+
+extern int proc_set_syscall_filter_callbacks(syscall_filter_cbs_t callback);
+extern int proc_set_syscall_filter_index(int which, int num, int index);
 extern size_t proc_get_syscall_filter_mask_size(int which);
 extern int proc_set_syscall_filter_mask(proc_t p, int which, unsigned char *maskptr, size_t masklen);
+extern int proc_set_filter_message_flag(proc_t p, boolean_t flag);
+extern int proc_get_filter_message_flag(proc_t p, boolean_t *flag);
 #endif /* KERNEL_PRIVATE */
 
 __END_DECLS
@@ -456,6 +489,7 @@ __END_DECLS
 
 __BEGIN_DECLS
 
+int task_read_for_pid(unsigned int target_tport, int pid, unsigned int *t);
 int pid_suspend(int pid);
 int pid_resume(int pid);
 

@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * HISTORY
  *
  * 17-Apr-91   Portions from libIO.m, Doug Mitchell at NeXT.
@@ -939,6 +944,16 @@ IOMallocPageable(vm_size_t size, vm_size_t alignment)
 	return addr;
 }
 
+void *
+IOMallocPageableZero(vm_size_t size, vm_size_t alignment)
+{
+	/* Avoid the legacy small allocator's alignment-mask array for >page. */
+	if (alignment > page_size) return NULL;
+	void *address = IOMallocPageable(size, alignment);
+	if (address) bzero(address, size);
+	return address;
+}
+
 void
 IOFreePageable(void * address, vm_size_t size)
 {
@@ -1350,3 +1365,133 @@ IOAlignmentToSize(IOAlignment align)
 	return size;
 }
 } /* extern "C" */
+
+/* Pinned external kalloc-type descriptor ABI. Native legacy zone ABI is never
+ * overlaid with a modern zone_view. Processed descriptors need a separate
+ * boot-time type-heap implementation and are rejected explicitly. */
+extern vm_size_t kalloc_max_prerounded;
+
+struct kalloc_type_view {
+    void *zone, *stats;
+    const char *name;
+    void *next;
+    const char *signature;
+    uint32_t flags, size;
+    void *unused1, *unused2;
+};
+struct kalloc_type_var_view {
+    uint16_t version, header_size;
+    uint32_t type_size;
+    void *stats;
+    const char *name;
+    void *next;
+    uint16_t heap_start;
+    uint8_t zones[20];
+    const char *header_signature, *type_signature;
+    uint32_t flags;
+};
+static_assert(sizeof(kalloc_type_view) == 64, "fixed descriptor ABI");
+static_assert(__builtin_offsetof(kalloc_type_view, size) == 44, "fixed size ABI");
+static_assert(sizeof(kalloc_type_var_view) == 80, "variable descriptor ABI");
+static_assert(__builtin_offsetof(kalloc_type_var_view, flags) == 72, "variable flags ABI");
+
+vm_size_t
+ravyn_kalloc_type_size(kalloc_type_view_t view)
+{
+    if (!view || view->zone || (view->flags & 0x8000))
+        panic("IOKit typed allocation: unsupported processed descriptor");
+    return view->size & 0x00ffffffU;
+}
+
+static bool
+ravyn_iokit_var_is_data(kalloc_type_var_view_t view)
+{
+    if (!view || view->version != 1 || (view->flags & 0x8000) || view->heap_start)
+        panic("IOKit typed allocation: unsupported variable descriptor");
+    for (unsigned i = 0; i < sizeof(view->zones); i++)
+        if (view->zones[i]) panic("IOKit typed allocation: processed variable zones");
+    return (view->flags & 0x8) != 0;
+}
+
+void *
+IOMallocData(vm_size_t size)
+{
+    return ravyn_kalloc_data(size, FALSE);
+}
+
+void
+IOFreeData(void *address, vm_size_t size)
+{
+    ravyn_kfree_data(address, size);
+}
+
+void *
+IOMallocTypeImpl(kalloc_type_view_t view)
+{
+    vm_size_t size = ravyn_kalloc_type_size(view);
+    bool nofail = (view->flags & 0x20) ? !(view->flags & 0x10) :
+        size < kalloc_max_prerounded;
+    if (nofail && size >= kalloc_max_prerounded)
+        panic("IOKit typed allocation: no-fail large allocation");
+    /* Match the reference external descriptor's NULL-zone fallback. Distinct
+     * allocation/free descriptors for the same type are valid. */
+    void *address = kalloc_tag_bt(size, VM_KERN_MEMORY_KALLOC);
+    if (!address && nofail) panic("IOKit typed allocation: no-fail allocation failed");
+    if (address) bzero(address, size);
+    return address;
+}
+
+void
+IOFreeTypeImpl(kalloc_type_view_t view, void *address)
+{
+    if (!address) return;
+    vm_size_t size = ravyn_kalloc_type_size(view);
+    if (ravyn_kalloc_is_data(address)) panic("IOKit typed free: data heap mismatch");
+    kfree(address, size);
+}
+
+void *
+IOMallocTypeVarImpl(kalloc_type_var_view_t view, vm_size_t size)
+{
+    bool data = ravyn_iokit_var_is_data(view);
+    if (size >> VM_KERNEL_POINTER_SIGNIFICANT_BITS) return NULL;
+    if (data) return ravyn_kalloc_data(size, TRUE);
+    void *address = kalloc_tag_bt(size, VM_KERN_MEMORY_KALLOC);
+    if (address) bzero(address, size);
+    return address;
+}
+
+void
+IOFreeTypeVarImpl(kalloc_type_var_view_t view, void *address, vm_size_t size)
+{
+    if (!address) return;
+    bool data = ravyn_iokit_var_is_data(view);
+    if (size >> VM_KERNEL_POINTER_SIGNIFICANT_BITS)
+        panic("IOKit typed free: absurd size");
+    if (data) {
+        ravyn_kfree_data(address, size);
+    } else {
+        if (ravyn_kalloc_is_data(address)) panic("IOKit typed free: data heap mismatch");
+        kfree(address, size);
+    }
+}
+
+/* Private external typed KPIs differ from IOMallocTypeImpl: caller flags
+ * control zeroing/waiting, and NOFAIL is not in the external KPI mask. */
+void *
+kalloc_type_impl_external(kalloc_type_view_t view, zalloc_flags_t flags)
+{
+    return ravyn_kalloc_flags(ravyn_kalloc_type_size(view), flags);
+}
+
+void
+kfree_type_impl_external(kalloc_type_view_t view, void *address)
+{
+    IOFreeTypeImpl(view, address);
+}
+
+void *
+IOMallocZeroData(vm_size_t size)
+{
+    return ravyn_kalloc_data(size, TRUE);
+}

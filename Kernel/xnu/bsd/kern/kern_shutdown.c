@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  *	File:	bsd/kern/kern_shutdown.c
  *
  *	Copyright (C) 1989, NeXT, Inc.
@@ -69,6 +74,7 @@
 #include <kern/clock.h>                 /* for delay_for_interval() */
 #include <libkern/OSAtomic.h>
 #include <IOKit/IOPlatformExpert.h>
+#include <pexpert/pexpert.h>
 
 #include <sys/kdebug.h>
 
@@ -208,6 +214,14 @@ reboot_kernel(int howto, char *message)
 	} else if ((howto & RB_NOSYNC) == 0) {
 		int iter, nbusy;
 
+		int ravynShutdownTrace = 0;
+		PE_parse_boot_argn("ravyn-shutdown-stackshot", &ravynShutdownTrace,
+		    sizeof(ravynShutdownTrace));
+		if (ravynShutdownTrace) {
+			extern void ravynScheduleShutdownStackshot(void);
+			ravynScheduleShutdownStackshot();
+		}
+
 		printf("syncing disks... ");
 
 		/*
@@ -222,10 +236,13 @@ reboot_kernel(int howto, char *message)
 
 #if CONFIG_AUDIT
 		startTime = mach_absolute_time();
+		if (ravynShutdownTrace) printf("RAVYN_SHUTDOWN audit begin\n");
 		audit_shutdown();
+		if (ravynShutdownTrace) printf("RAVYN_SHUTDOWN audit end\n");
 		halt_log_enter("audit_shutdown", 0, mach_absolute_time() - startTime);
 #endif
 
+		if (ravynShutdownTrace) printf("RAVYN_SHUTDOWN pre-hook\n");
 		if (unmountroot_pre_hook != NULL) {
 			unmountroot_pre_hook();
 		}
@@ -233,13 +250,16 @@ reboot_kernel(int howto, char *message)
 		startTime = mach_absolute_time();
 		sync((proc_t)NULL, (void *)NULL, (int *)NULL);
 
+		if (ravynShutdownTrace) printf("RAVYN_SHUTDOWN sync end\n");
 		if (kdebug_enable) {
 			startTime = mach_absolute_time();
 			kdbg_dump_trace_to_file("/var/log/shutdown/shutdown.trace");
 			halt_log_enter("shutdown.trace", 0, mach_absolute_time() - startTime);
 		}
 
+		if (ravynShutdownTrace) printf("RAVYN_SHUTDOWN trace end\n");
 		IOSystemShutdownNotification(kIOSystemShutdownNotificationStageRootUnmount);
+		if (ravynShutdownTrace) printf("RAVYN_SHUTDOWN root notification end\n");
 
 		/*
 		 * Unmount filesystems

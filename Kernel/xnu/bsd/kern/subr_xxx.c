@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
 /*
  * Copyright (c) 1982, 1986, 1991, 1993
@@ -72,6 +77,10 @@
 
 #include <sys/signalvar.h>              /* for psignal() */
 #include <kern/debug.h>
+#include <kern/thread.h>
+#include <sys/user.h>
+#include <sys/bsdtask_info.h>
+#include <libkern/OSAtomic.h>
 
 #if DEVELOPMENT || DEBUG
 bool send_sigsys = true;
@@ -182,6 +191,11 @@ nullsys(void)
 int
 nosys(__unused struct proc *p, __unused struct nosys_args *args, __unused int32_t *retval)
 {
+	static volatile int32_t diagnostic_count;
+	if (OSIncrementAtomic(&diagnostic_count) < 64) {
+		struct uthread *ut = get_bsdthread_info(current_thread());
+		printf("RAVYN-NOSYS pid=%d name=%s syscall=%u\n", p->p_pid, p->p_comm, ut->syscall_code);
+	}
 	if (send_sigsys) {
 		psignal_uthread(current_thread(), SIGSYS);
 	}

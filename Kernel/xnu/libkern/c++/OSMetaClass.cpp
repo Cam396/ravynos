@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* OSMetaClass.cpp created by gvdl on Fri 1998-11-17 */
 
 #include <string.h>
@@ -627,6 +632,23 @@ OSMetaClass::OSMetaClass(
 	}
 }
 
+#if KERNEL_PRIVATE
+OSMetaClass::OSMetaClass(
+	const char        * inClassName,
+	const OSMetaClass * inSuperClass,
+	unsigned int        inClassSize,
+	zone_t            * inZone,
+	const char        * zone_name,
+	zone_create_flags_t zflags) : OSMetaClass(inClassName, inSuperClass,
+	    inClassSize)
+{
+	if (!(kIOTracking & gIOKitDebug)) {
+		*inZone = zone_create(zone_name, inClassSize,
+		    (zone_create_flags_t) (ZC_ZFREE_CLEARMEM | zflags));
+	}
+}
+#endif
+
 /*********************************************************************
 *********************************************************************/
 OSMetaClass::~OSMetaClass()
@@ -738,6 +760,27 @@ const OSSymbol *
 OSMetaClass::getClassNameSymbol() const
 {
 	return className;
+}
+
+/*********************************************************************
+*********************************************************************/
+const OSSymbol *
+OSMetaClass::copyClassNameSymbol() const
+{
+	const OSSymbol *ret = NULL;
+
+	IOLockLock(sAllClassesLock);
+	ret = className;
+	if (ret) {
+		if (reserved && reserved->kext) {
+			ret->retain();
+		} else {
+			ret = OSSymbol::withCString((const char *)ret);
+		}
+	}
+	IOLockUnlock(sAllClassesLock);
+
+	return ret;
 }
 /*********************************************************************
 *********************************************************************/

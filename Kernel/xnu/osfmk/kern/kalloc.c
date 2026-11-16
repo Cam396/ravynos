@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -78,6 +83,9 @@
 #include <vm/vm_object.h>
 #include <vm/vm_map.h>
 #include <libkern/OSMalloc.h>
+#include <libkern/OSDebug.h>
+#include <pexpert/pexpert.h>
+#include <machine/machine_routines.h>
 #include <sys/kdebug.h>
 
 #include <san/kasan.h>
@@ -375,6 +383,99 @@ void OSMalloc_Tagrele(OSMallocTag       tag);
  *	This initializes all of the zones.
  */
 
+
+/* The legacy kernel has no KHEAP_DATA_BUFFERS. Keep its data storage in
+ * distinct zones and a dedicated VM map, retaining ordinary kalloc behavior. */
+static zone_t ravyn_data_zones[MAX_K_ZONE];
+static char ravyn_data_zone_names[MAX_K_ZONE][32];
+static vm_map_t ravyn_data_map;
+static vm_offset_t ravyn_data_min, ravyn_data_max;
+
+/* Opt-in data-heap ownership history. No allocation in record/dump paths.
+ * This records allocator ownership transitions, not the corrupting writer. */
+#define RAVYN_DATA_HISTORY_COUNT 4096
+#define RAVYN_DATA_HISTORY_FRAMES 8
+static boolean_t ravyn_data_history_enabled;
+decl_simple_lock_data(static, ravyn_data_history_lock);
+struct ravyn_data_history_event {
+    uint64_t sequence;
+    void *address;
+    vm_size_t size;
+    unsigned int frames;
+    char operation;
+    void *trace[RAVYN_DATA_HISTORY_FRAMES];
+};
+static struct ravyn_data_history_event ravyn_data_history[RAVYN_DATA_HISTORY_COUNT];
+static uint64_t ravyn_data_history_sequence;
+
+static void
+ravyn_data_history_record(void *address, vm_size_t size, char operation)
+{
+    if (!ravyn_data_history_enabled || !address || size > 16) return;
+    struct ravyn_data_history_event event = {0};
+    event.address = address;
+    event.size = size;
+    event.operation = operation;
+    event.frames = OSBacktrace(event.trace, RAVYN_DATA_HISTORY_FRAMES);
+    boolean_t interrupts = ml_set_interrupts_enabled(FALSE);
+    simple_lock(&ravyn_data_history_lock, LCK_GRP_NULL);
+    event.sequence = ++ravyn_data_history_sequence;
+    ravyn_data_history[(event.sequence - 1) % RAVYN_DATA_HISTORY_COUNT] = event;
+    simple_unlock(&ravyn_data_history_lock);
+    ml_set_interrupts_enabled(interrupts);
+}
+
+void
+ravyn_data_history_dump(void *address)
+{
+    if (!ravyn_data_history_enabled) return;
+    printf("RAVYN_DATA_HISTORY address=0x%016llx capacity=%u\n", (uint64_t)(uintptr_t)address, RAVYN_DATA_HISTORY_COUNT);
+    for (unsigned int i = 0; i < RAVYN_DATA_HISTORY_COUNT; i++) {
+        struct ravyn_data_history_event event;
+        boolean_t interrupts = ml_set_interrupts_enabled(FALSE);
+        simple_lock(&ravyn_data_history_lock, LCK_GRP_NULL);
+        event = ravyn_data_history[i];
+        simple_unlock(&ravyn_data_history_lock);
+        ml_set_interrupts_enabled(interrupts);
+        if (!event.sequence || event.address != address) continue;
+        printf("RAVYN_DATA_EVENT seq=%llu op=%c size=%lu frames=%u\n",
+            event.sequence, event.operation, (unsigned long)event.size, event.frames);
+        for (unsigned int j = 0; j < event.frames; j++)
+            printf("RAVYN_DATA_FRAME seq=%llu frame=%u pc=0x%016llx\n", event.sequence, j, (uint64_t)(uintptr_t)event.trace[j]);
+    }
+}
+
+static void
+ravyn_kalloc_data_init(vm_size_t map_size, vm_map_kernel_flags_t vmk_flags)
+{
+    vm_offset_t minimum;
+    simple_lock_init(&ravyn_data_history_lock, 0);
+    int history_requested = 0;
+    if (PE_parse_boot_argn("ravyn_datatrace", &history_requested, sizeof(history_requested)))
+        ravyn_data_history_enabled = history_requested != 0;
+    /* Reserve VA only; pages are committed as actual allocations are made.
+     * A physical-memory-sized map bounds the data heap without mixing it
+     * into the pointer heap on exhaustion. */
+    if (map_size < (vm_size_t)sane_size) map_size = (vm_size_t)sane_size;
+    map_size = round_page(map_size);
+    if (kmem_suballoc(kernel_map, &minimum, map_size, FALSE, VM_FLAGS_ANYWHERE,
+        vmk_flags, VM_KERN_MEMORY_KALLOC, &ravyn_data_map) != KERN_SUCCESS)
+        panic("kalloc data: submap allocation failed");
+    ravyn_data_min = minimum;
+    ravyn_data_max = minimum + map_size;
+    for (int i = 0; i < MAX_K_ZONE; i++) {
+        vm_size_t size = k_zone_config[i].kzc_size;
+        if (size >= kalloc_max) break;
+        snprintf(ravyn_data_zone_names[i], sizeof(ravyn_data_zone_names[i]),
+            "kalloc.data.%u", (unsigned)size);
+        zone_t zone = zinit(size, size, size, ravyn_data_zone_names[i]);
+        zone_change(zone, Z_CALLERACCT, FALSE);
+        zone_change(zone, Z_KASAN_QUARANTINE, FALSE);
+        /* Separate zones intentionally start without per-CPU caching. */
+        ravyn_data_zones[i] = zone;
+    }
+}
+
 void
 kalloc_init(
 	void)
@@ -506,6 +607,7 @@ kalloc_init(
 
 	lck_grp_init(&kalloc_lck_grp, "kalloc.large", LCK_GRP_ATTR_NULL);
 	lck_mtx_init(&kalloc_lock, &kalloc_lck_grp, LCK_ATTR_NULL);
+	ravyn_kalloc_data_init(kalloc_map_size, vmk_flags);
 	OSMalloc_init();
 #ifdef  MUTEX_ZONE
 	lck_mtx_zone = zinit(sizeof(struct _lck_mtx_), 1024 * 256, 4096, "lck_mtx");
@@ -686,10 +788,11 @@ vm_size_t
 }
 #endif
 
-void *
-kalloc_canblock(
+static void *
+kalloc_canblock_internal(
 	vm_size_t             *psize,
 	boolean_t             canblock,
+	boolean_t             nopagewait,
 	vm_allocation_site_t *site)
 {
 	zone_t z;
@@ -741,12 +844,12 @@ kalloc_canblock(
 			tag = vm_tag_alloc(site);
 		}
 
-		if (kmem_alloc_flags(alloc_map, (vm_offset_t *)&addr, size, tag, KMA_ATOMIC) != KERN_SUCCESS) {
+		if (kmem_alloc_flags(alloc_map, (vm_offset_t *)&addr, size, tag, KMA_ATOMIC | (nopagewait ? KMA_NOPAGEWAIT : 0)) != KERN_SUCCESS) {
 			if (alloc_map != kernel_map) {
 				if (kalloc_fallback_count++ == 0) {
 					printf("%s: falling back to kernel_map\n", __func__);
 				}
-				if (kmem_alloc_flags(kernel_map, (vm_offset_t *)&addr, size, tag, KMA_ATOMIC) != KERN_SUCCESS) {
+				if (kmem_alloc_flags(kernel_map, (vm_offset_t *)&addr, size, tag, KMA_ATOMIC | (nopagewait ? KMA_NOPAGEWAIT : 0)) != KERN_SUCCESS) {
 					addr = NULL;
 				}
 			} else {
@@ -804,7 +907,8 @@ kalloc_canblock(
 	}
 #endif
 
-	addr =  zalloc_canblock_tag(z, canblock, size, tag);
+	addr = nopagewait ? zalloc_nopagewait_tag(z, size, tag) :
+	    zalloc_canblock_tag(z, canblock, size, tag);
 
 #if KASAN_KALLOC
 	/* fixup the return address to skip the redzone */
@@ -818,6 +922,28 @@ kalloc_canblock(
 
 	DTRACE_VM3(kalloc, vm_size_t, size, vm_size_t, *psize, void*, addr);
 	return addr;
+}
+
+/* Keep every legacy caller on its original blocking/allocation path. */
+void *
+kalloc_canblock(vm_size_t *psize, boolean_t canblock, vm_allocation_site_t *site)
+{
+	return kalloc_canblock_internal(psize, canblock, FALSE, site);
+}
+
+void *
+ravyn_kalloc_flags(vm_size_t size, zalloc_flags_t flags)
+{
+	/* XNU8020 external wrappers discard NOFAIL, tags and private flags. */
+	flags &= Z_NOWAIT | Z_NOPAGEWAIT | Z_ZERO;
+	if (size >> VM_KERNEL_POINTER_SIGNIFICANT_BITS) return NULL;
+	boolean_t canblock = (flags & Z_NOWAIT) == 0;
+	boolean_t nopagewait = canblock && (flags & Z_NOPAGEWAIT);
+	VM_ALLOC_SITE_STATIC(VM_TAG_BT, VM_KERN_MEMORY_KALLOC);
+	vm_size_t actual_size = size;
+	void *address = kalloc_canblock_internal(&actual_size, canblock, nopagewait, &site);
+	if (address && (flags & Z_ZERO)) bzero(address, size);
+	return address;
 }
 
 void *
@@ -1083,4 +1209,106 @@ OSMalloc_size(
 	void                            *addr)
 {
 	return (uint32_t)kalloc_size(addr);
+}
+
+/* Modern IOKit data-heap backend, separate from all legacy pointer zones. */
+static zone_t
+ravyn_kalloc_data_zone(vm_size_t size)
+{
+    for (int i = 0; i < MAX_K_ZONE; i++) {
+        if ((vm_size_t)k_zone_config[i].kzc_size >= size)
+            return ravyn_data_zones[i];
+    }
+    return ZONE_NULL;
+}
+
+static void *
+ravyn_kalloc_data_flags(vm_size_t size, zalloc_flags_t flags)
+{
+    flags &= Z_NOWAIT | Z_NOPAGEWAIT | Z_ZERO;
+    if (size >> VM_KERNEL_POINTER_SIGNIFICANT_BITS) return NULL;
+    void *address = NULL;
+    if (size < kalloc_max_prerounded) {
+        zone_t zone = ravyn_kalloc_data_zone(size);
+        assert(zone != ZONE_NULL);
+        address = ((flags & Z_NOPAGEWAIT) && !(flags & Z_NOWAIT)) ?
+            zalloc_nopagewait_tag(zone, size, VM_KERN_MEMORY_KALLOC) :
+            zalloc_canblock_tag(zone, (flags & Z_NOWAIT) == 0, size, VM_KERN_MEMORY_KALLOC);
+    } else {
+        /* Large NOWAIT allocations fail without entering VM, as in XNU8020. */
+        if (flags & Z_NOWAIT) return NULL;
+        /* Validate before page rounding; never wrap an overflow sentinel. */
+        vm_size_t extent = round_page(size);
+        if (extent < size || extent > ravyn_data_max - ravyn_data_min) return NULL;
+        vm_offset_t allocation = 0;
+        if (kmem_alloc_flags(ravyn_data_map, &allocation, extent,
+            VM_KERN_MEMORY_KALLOC, KMA_ATOMIC |
+            ((flags & Z_NOPAGEWAIT) ? KMA_NOPAGEWAIT : 0)) == KERN_SUCCESS) {
+            address = (void *)allocation;
+            KALLOC_ZINFO_SALLOC(extent);
+        }
+    }
+    if (address && (flags & Z_ZERO)) bzero(address, size);
+    ravyn_data_history_record(address, size, 'A');
+    return address;
+}
+
+void *
+ravyn_kalloc_data(vm_size_t size, boolean_t zero)
+{
+    return ravyn_kalloc_data_flags(size, zero ? Z_ZERO : Z_WAITOK);
+}
+
+void *
+kalloc_data_external(vm_size_t size, zalloc_flags_t flags)
+{
+    return ravyn_kalloc_data_flags(size, flags);
+}
+
+void
+kfree_data_external(void *address, vm_size_t size)
+{
+    ravyn_kfree_data(address, size);
+}
+
+void
+ravyn_kfree_data(void *address, vm_size_t size)
+{
+    if (address == NULL) return;
+    if (size >> VM_KERNEL_POINTER_SIGNIFICANT_BITS)
+        panic("kalloc data: invalid free size %lu", (unsigned long)size);
+    if (size < kalloc_max_prerounded) {
+        zone_t zone = ravyn_kalloc_data_zone(size);
+        assert(zone != ZONE_NULL);
+        zone_require(address, zone);
+        ravyn_data_history_record(address, size, 'F');
+        zfree(zone, address);
+        return;
+    }
+    vm_offset_t va = (vm_offset_t)address;
+    if (va < ravyn_data_min || va >= ravyn_data_max)
+        panic("kalloc data: pointer outside data map %p", address);
+    vm_size_t extent = round_page(size);
+    if (extent < size) panic("kalloc data: free extent overflow");
+    vm_map_lock(ravyn_data_map);
+    vm_size_t actual = vm_map_lookup_kalloc_entry_locked(ravyn_data_map, address);
+    if (actual != extent) panic("kalloc data: free extent mismatch");
+    kern_return_t kr = vm_map_remove_locked(ravyn_data_map, va, va + actual,
+        VM_MAP_REMOVE_KUNWIRE);
+    vm_map_unlock(ravyn_data_map);
+    if (kr != KERN_SUCCESS) panic("kalloc data: VM free failed %d", kr);
+    KALLOC_ZINFO_SFREE(actual);
+}
+
+boolean_t
+ravyn_kalloc_is_data(void *address)
+{
+    if (address == NULL) return FALSE;
+    vm_offset_t va = (vm_offset_t)address;
+    if (va >= ravyn_data_min && va < ravyn_data_max) return TRUE;
+    zone_t zone = ZONE_NULL;
+    if (!zone_element_size(address, &zone)) return FALSE;
+    for (int i = 0; i < MAX_K_ZONE; i++)
+        if (zone && zone == ravyn_data_zones[i]) return TRUE;
+    return FALSE;
 }

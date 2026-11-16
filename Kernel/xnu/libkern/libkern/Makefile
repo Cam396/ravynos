@@ -57,6 +57,7 @@ PRIVATE_KERNELFILES = \
 	kext_request_keys.h \
 	mkext.h \
 	prelink.h \
+	ravyn_amfi.h \
 	section_keywords.h \
 	Block_private.h
 

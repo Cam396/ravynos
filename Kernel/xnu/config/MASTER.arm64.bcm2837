@@ -9,6 +9,7 @@
 ######################################################################
 #
 #  Master Apple configuration file (see the master machine independent
+# NOTICE: Modified for ravynOS macOS bring-up (2026-10-18 to 2026-11-15) under APSL-2.0 clause 2.2(b).
 #  configuration file for a description of the file format).
 #
 ######################################################################
@@ -24,7 +25,7 @@
 #  BSD_RELEASE =    [ BSD_BASE no_printf_str no_kprintf_str secure_kernel ]
 #  BSD_DEV =        [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
 #  BSD_DEBUG =      [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
-#  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_fse routefs namedstreams ]
+#  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_fse routefs namedstreams config_rosv_startup config_firmlinks ]
 #  FILESYS_RELEASE= [ FILESYS_BASE ]
 #  FILESYS_DEV =    [ FILESYS_BASE fdesc ]
 #  FILESYS_DEBUG =  [ FILESYS_BASE fdesc ]
@@ -62,7 +63,7 @@
 #  VM_RELEASE =     [ VM_BASE ]
 #  VM_DEV =         [ VM_BASE dynamic_codesigning ]
 #  VM_DEBUG =       [ VM_BASE dynamic_codesigning ]
-#  SECURITY =       [ config_macf kernel_integrity ]
+#  SECURITY =       [ config_macf kernel_integrity config_audit config_csr ]
 #  RELEASE =        [ KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE NFS_RELEASE SKYWALK_RELEASE NETWORKING_RELEASE PF MULTIPATH VPN IOKIT_RELEASE LIBKERN_RELEASE PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY ]
 #  DEVELOPMENT =    [ KERNEL_DEV     BSD_DEV     FILESYS_DEV NFS_DEV SKYWALK_DEV     NETWORKING_DEV PF MULTIPATH VPN IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY ]
 #  DEBUG =          [ KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG NFS_DEBUG  SKYWALK_DEBUG   NETWORKING_DEBUG PF MULTIPATH VPN IOKIT_DEBUG   LIBKERN_DEBUG   PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY ]

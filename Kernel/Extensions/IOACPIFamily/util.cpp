@@ -134,9 +134,12 @@ ACPIPlatformExpert::parseAPIC(void * table, IOService * nub)
     for (MADT_Record * scan = madt->records;
          (uint64_t)scan < ((uint64_t)madt + madt->length) && scan->length != 0;
          scan = (MADT_Record *) ((uint64_t)scan + scan->length)) {
-        if (scan->type == 0) {
-            haveLegacyLapics = true;
-            break;
+        if (scan->type == 0 && scan->length >= sizeof(LAPIC_RECORD)) {
+            const LAPIC_RECORD *legacy = (const LAPIC_RECORD *)scan;
+            if (legacy->flags & 1u) {
+                haveLegacyLapics = true;
+                break;
+            }
         }
     }
 
@@ -152,6 +155,13 @@ ACPIPlatformExpert::parseAPIC(void * table, IOService * nub)
 
                 if (rec->type == 0) {
                     struct LAPIC_RECORD * lr = (struct LAPIC_RECORD *) rec;
+                    if (rec->length < sizeof(*lr)) {
+                        PE_Log("Malformed MADT LAPIC record, length %d", rec->length);
+                        break;
+                    }
+                    if (!(lr->flags & 1u)) {
+                        break; /* disabled CPUs are not startable by this driver */
+                    }
                     apic_id = lr->lapic_id;
                     proc_id = lr->proc_id;
                 } else {
@@ -173,7 +183,21 @@ ACPIPlatformExpert::parseAPIC(void * table, IOService * nub)
                     proc_id = xr->acpi_uid;
                 }
 
-                ncpus++;
+                bool duplicateAPICID = false;
+                for (unsigned int i = 0; i < cpuArray->getCount(); ++i) {
+                    IOService *existing = OSDynamicCast(IOService, cpuArray->getObject(i));
+                    OSNumber *existingID = existing ? OSDynamicCast(OSNumber,
+                        existing->getProperty("apic-id")) : NULL;
+                    if (existingID && existingID->unsigned32BitValue() == apic_id) {
+                        duplicateAPICID = true;
+                        break;
+                    }
+                }
+                if (duplicateAPICID) {
+                    PE_Log("Ignoring duplicate MADT APIC ID %u", apic_id);
+                    break;
+                }
+
                 OSDictionary * dict = OSDictionary::withCapacity(7);
 
                 dict->setObject("device_type", OSString::withCString("processor"));
@@ -191,6 +215,7 @@ ACPIPlatformExpert::parseAPIC(void * table, IOService * nub)
                     aNub->attach(nub);
                     aNub->registerService();
                     aNub->release();
+                    ncpus++;
                 }
                 dict->release();
                 break;
@@ -209,6 +234,16 @@ ACPIPlatformExpert::parseAPIC(void * table, IOService * nub)
                                 OSNumber::withNumber(apic->address, 32));
 
                 sprintf(buf, "io-apic@%d", apic->io_apic_id);
+                // ISA interrupt sources belong to the IOAPIC whose GSI range
+                // starts at zero. Its firmware ID need not be zero (VMware
+                // uses ID 2 with this guest's two virtual CPUs).
+                if (apic->gsi_base == 0) {
+                    const OSSymbol *isaController = OSSymbol::withCString(buf);
+                    if (isaController) {
+                        if (_interruptControllerName) _interruptControllerName->release();
+                        _interruptControllerName = isaController;
+                    }
+                }
                 dict->setObject("InterruptControllerName", OSSymbol::withCString(buf));
                 dict->setObject("name", OSString::withCString(buf));
                 dict->setObject("compatible", OSString::withCString("io-apic"));

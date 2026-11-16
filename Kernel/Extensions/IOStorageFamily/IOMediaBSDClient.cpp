@@ -20,6 +20,11 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <sys/types.h>                       // (miscfs/devfs/devfs.h, ...)
 
@@ -255,8 +260,12 @@ protected:
 ///w:stop
 
 public:
+#if defined(RAVYN_ARM64_STATIC_IOSTORAGE)
+    void initializeBuiltIn();
+#else
     IOMediaBSDClientGlobals();
     ~IOMediaBSDClientGlobals();
+#endif
 
     AnchorTable * getAnchors();
     MinorTable *  getMinors();
@@ -289,6 +298,15 @@ public:
 };
 
 static IOMediaBSDClientGlobals gIOMediaBSDClientGlobals;
+
+#if defined(RAVYN_ARM64_STATIC_IOSTORAGE)
+/* Called once by StartIOKit after the BSD device-switch lock is initialized.
+ * A dynamic constructor would run during OSlibkernInit, too early for devsw. */
+extern "C" void ravyn_recovery_storage_bsd_init(void)
+{
+    gIOMediaBSDClientGlobals.initializeBuiltIn();
+}
+#endif
 
 bool IOMediaBSDClient::init(OSDictionary * properties)
 {
@@ -3890,7 +3908,11 @@ static int devsw_remove(int index, struct bdevsw * bsw, struct cdevsw * csw)
     return index;
 }
 
+#if defined(RAVYN_ARM64_STATIC_IOSTORAGE)
+void IOMediaBSDClientGlobals::initializeBuiltIn()
+#else
 IOMediaBSDClientGlobals::IOMediaBSDClientGlobals()
+#endif
 {
     //
     // Initialize the minimal global state.
@@ -3914,6 +3936,7 @@ IOMediaBSDClientGlobals::IOMediaBSDClientGlobals()
 ///w:stop
 }
 
+#if !defined(RAVYN_ARM64_STATIC_IOSTORAGE)
 IOMediaBSDClientGlobals::~IOMediaBSDClientGlobals()
 {
     //
@@ -3936,6 +3959,8 @@ IOMediaBSDClientGlobals::~IOMediaBSDClientGlobals()
     if ( _iostorageMallocTag )          OSMalloc_Tagfree(_iostorageMallocTag);
     _iostorageMallocTag = NULL;
 }
+
+#endif
 
 AnchorTable * IOMediaBSDClientGlobals::getAnchors()
 {

@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -294,6 +299,8 @@ panic_init(void)
 	 */
 	debug_boot_arg = 0;
 
+/* BCM2837 VM honors the debug boot argument instead of forcing a KDP wait. */
+#if !defined(ARM64_BOARD_CONFIG_BCM2837)
 	/************** FIXME FIXME FIXME **********
          * Remove this block once done debugging!!
          *******************************************/
@@ -303,6 +310,8 @@ panic_init(void)
 	debug_boot_arg_inited = TRUE;
 	debugger_is_panic = TRUE;
 	/******************************************/
+
+#endif
 
 #if ((CONFIG_EMBEDDED && MACH_KDP) || defined(__x86_64__))
 	if (PE_parse_boot_argn("debug", &debug_boot_arg, sizeof(debug_boot_arg))) {

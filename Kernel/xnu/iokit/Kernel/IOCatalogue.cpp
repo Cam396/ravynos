@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Copyright (c) 1998 Apple Inc.  All rights reserved.
  *
  * HISTORY
@@ -86,51 +91,6 @@ OSDefineMetaClassAndStructors(IOCatalogue, OSObject)
 
 static bool isModuleLoadedNoOSKextLock(OSDictionary *theKexts,
     OSDictionary *theModuleDict);
-static bool gIOCatalogueWarnedRawMetaClassName;
-
-/*
- * During early kext C++ bring-up, some metaclasses still have a C
- * string as their className instead of the OSSymbol it becomes later.
- * This can prevent driver matching in our early prelink startup, so
- * we use this helper to ensure we get the right name.
- */
-static const OSSymbol *
-IOCatalogueMetaClassSymbol(const OSMetaClass *meta, bool *needsRelease)
-{
-	if (needsRelease) {
-		*needsRelease = false;
-	}
-	if (!meta) {
-		return NULL;
-	}
-
-	const OSSymbol *classSym = meta->getClassNameSymbol();
-	if (!classSym) {
-		return NULL;
-	}
-
-	const uint8_t lead = *(const volatile uint8_t *)classSym;
-	if ((lead >= 'A' && lead <= 'Z') ||
-	    (lead >= 'a' && lead <= 'z') ||
-	    lead == '_') {
-		const char *rawName = (const char *)classSym;
-		if (!gIOCatalogueWarnedRawMetaClassName) {
-			gIOCatalogueWarnedRawMetaClassName = true;
-			kprintf("IOCatalogue: normalized raw metaclass name '%s' (fix kext C++ init ordering)\n",
-			    rawName ? rawName : "<null>");
-		}
-		const OSSymbol *normalized = OSSymbol::existingSymbolForCString(rawName);
-		if (!normalized) {
-			normalized = OSSymbol::withCString(rawName);
-			if (normalized && needsRelease) {
-				*needsRelease = true;
-			}
-		}
-		return normalized;
-	}
-
-	return classSym;
-}
 
 
 /*********************************************************************
@@ -269,13 +229,11 @@ IOCatalogue::findDrivers(
 
 	meta = service->getMetaClass();
 	while (meta) {
-		bool needsRelease = false;
-		/* Use our helper to avoid early C-string classNames */
-		const OSSymbol *classSym = IOCatalogueMetaClassSymbol(meta, &needsRelease);
-		array = classSym ? OSDynamicCast(OSArray, personalities->getObject(classSym)) : NULL;
-		if (needsRelease && classSym) {
-			classSym->release();
-		}
+        const OSSymbol *classSym = meta->copyClassNameSymbol();
+        array = classSym ? OSDynamicCast(OSArray, personalities->getObject(classSym)) : NULL;
+        if (classSym) {
+            classSym->release();
+        }
 		if (array) {
 			for (idx = 0; (nextTable = (OSDictionary *) array->getObject(idx)); idx++) {
 				set->setObject(nextTable);

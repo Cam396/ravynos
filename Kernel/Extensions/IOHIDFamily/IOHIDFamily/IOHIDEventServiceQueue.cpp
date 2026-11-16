@@ -20,6 +20,11 @@
  *
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <IOKit/system.h>
 #include <IOKit/IOLib.h>
@@ -48,6 +53,8 @@ IOHIDEventServiceQueue *IOHIDEventServiceQueue::withCapacity(UInt32 size, UInt32
             dataQueue = 0;
         }
     }
+
+    if (!dataQueue) return NULL;
 
     dataQueue->_options = options;
     dataQueue->_notificationCount = 0;

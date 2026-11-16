@@ -25,10 +25,16 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <IOKit/system.h>
 #include <IOKit/IOService.h>
 #include <libkern/OSDebug.h>
+#include <libkern/OSAtomic.h>
 #include <libkern/c++/OSContainers.h>
 #include <libkern/c++/OSKext.h>
 #include <libkern/c++/OSUnserialize.h>
@@ -85,6 +91,20 @@ enum{
 #define super IORegistryEntry
 
 OSDefineMetaClassAndStructors(IOService, IORegistryEntry)
+
+/* Class-specific ABI added by Monterey. Use this kernel's native zeroed,
+ * tagged OSObject allocation and matching sized deallocation. */
+void *
+IOService::operator new(size_t size)
+{
+	return OSObject::operator new(size);
+}
+
+void
+IOService::operator delete(void *memory, size_t size)
+{
+	OSObject::operator delete(memory, size);
+}
 
 OSDefineMetaClassAndStructors(_IOServiceNotifier, IONotifier)
 OSDefineMetaClassAndStructors(_IOServiceNullNotifier, IONotifier)
@@ -1098,6 +1118,11 @@ void
 IOService::kextdLaunched(void)
 {
 #if !NO_KEXTD
+	/* All daemon protocols share one completion, including concurrent retries. */
+	static volatile UInt32 startupCompleted = 0;
+	if (!OSCompareAndSwap(0, 1, &startupCompleted)) {
+		return;
+	}
 	IOServiceTrace(IOSERVICE_KEXTD_READY, 0, 0, 0, 0);
 	startDeferredMatches();
 	getServiceRoot()->adjustBusy(-1);
@@ -4413,7 +4438,15 @@ skip_log:
 		clock_get_uptime(&startTime);
 	}
 
+	int ravynTrace = 0;
+	PE_parse_boot_argn("ravyn-root-stackshot", &ravynTrace, sizeof(ravynTrace));
+	if (ravynTrace && this == gIOResources) {
+		kprintf("RAVYN_RESOURCE_START %s\n", service->getName());
+	}
 	ok = service->start(this);
+	if (ravynTrace && this == gIOResources) {
+		kprintf("RAVYN_RESOURCE_DONE %s result=%d\n", service->getName(), ok);
+	}
 
 	if (kIOLogStart & gIOKitDebug) {
 		clock_get_uptime(&endTime);
@@ -4551,6 +4584,11 @@ IOService::checkResource( OSObject * matching )
 		LOG("config(%p): stalling %s\n", IOSERVICE_OBFUSCATE(IOThreadSelf()), getName());
 	}
 
+	int ravynTrace = 0;
+	PE_parse_boot_argn("ravyn-root-stackshot", &ravynTrace, sizeof(ravynTrace));
+	if (ravynTrace && str) {
+		kprintf("RAVYN_RESOURCE_WAIT %s key=%s\n", getName(), str->getCStringNoCopy());
+	}
 	waitForService( table );
 
 	if (gIOKitDebug & kIOLogConfig) {

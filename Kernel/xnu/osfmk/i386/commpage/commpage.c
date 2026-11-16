@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*
  *	Here's what to do if you want to add a new routine to the comm page:
@@ -555,6 +560,9 @@ commpage_populate_one(
 	commpage_stuff(_COMM_PAGE_SPIN_COUNT, &c4, 4);
 
 	/* machine_info valid after ml_get_max_cpus() */
+	kprintf("RAVYN-SMP-COMMPAGE max=%d logical_max=%d physical_max=%d active=%d\n",
+	    machine_info.max_cpus, machine_info.logical_cpu_max,
+	    machine_info.physical_cpu_max, machine_info.logical_cpu);
 	c1 = machine_info.physical_cpu_max;
 	commpage_stuff(_COMM_PAGE_PHYSICAL_CPUS, &c1, 1);
 	c1 = machine_info.logical_cpu_max;

@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /* 
@@ -120,6 +125,22 @@ routine		mach_exception_raise_state_identity(
 		  inout flavor          : int;
 			old_state       : thread_state_t;
 		    out new_state       : thread_state_t
+#if MACH_EXC_SERVER_SECTOKEN
+ ;
+ ServerSecToken stoken	: security_token_t
+#endif
+#if MACH_EXC_SERVER_AUDITTOKEN
+ ;
+ ServerAuditToken atoken: audit_token_t
+#endif
+			);
+
+routine		mach_exception_raise_identity_protected(
+			exception_port	: mach_port_t;
+			thread_id	: uint64_t;
+			task_id_token_t	: mach_port_t;
+			exception	: exception_type_t;
+			code		: mach_exception_data_t
 #if MACH_EXC_SERVER_SECTOKEN
  ;
  ServerSecToken stoken	: security_token_t

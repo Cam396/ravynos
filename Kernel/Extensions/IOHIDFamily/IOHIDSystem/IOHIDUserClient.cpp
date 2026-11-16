@@ -21,6 +21,11 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Copyright (c) 1998 Apple Computer, Inc.  All rights reserved.
  *
  * HISTORY
@@ -524,11 +529,13 @@ IOReturn IOHIDEventSystemUserClient::createEventQueueGated(void*p1,void*p2,void*
     require_action(owner, exit, ret = kIOReturnOffline);
     require_action(!kernelQueue, exit, *pToken = kIOHIDEventSystemKernelQueueID; ret = kIOReturnSuccess);
     
-    kernelQueue = 0; //IOHIDEventServiceQueue::withCapacity(this, (UInt32)size);
+    kernelQueue = IOHIDEventServiceQueue::withCapacity(this, (UInt32)size);
     require_action(kernelQueue, exit, ret = kIOReturnNoMemory);
     
     kernelQueue->setState(true);
+    setProperty("KernelEventQueue", kernelQueue);
     owner->registerEventQueue(kernelQueue);
+    IOLog("IOHIDEventSystemUserClient: created kernel event queue, capacity %u\n", (unsigned)size);
     *pToken = kIOHIDEventSystemKernelQueueID;
     ret = kIOReturnSuccess;
     
@@ -559,6 +566,7 @@ IOReturn IOHIDEventSystemUserClient::destroyEventQueueGated(void*p1,void*p2,void
         owner->unregisterEventQueue(kernelQueue);
     }
     
+    removeProperty("KernelEventQueue");
     kernelQueue->release();
     kernelQueue = NULL;
     ret = kIOReturnSuccess;

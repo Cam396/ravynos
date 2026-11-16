@@ -1,6 +1,11 @@
 /*
  * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*
  * file: pe_serial.c Polled-mode UART0 driver for S3c2410 and PL011.
@@ -765,7 +770,7 @@ pi3_uart_init(void)
 	BCM2837_PUT32(BCM2837_AUX_MU_IIR_REG_V, 0xC6);
 	BCM2837_PUT32(BCM2837_AUX_MU_BAUD_REG_V, 270);
 
-	i = BCM2837_FSEL_REG(14);
+	i = BCM2837_GET32(BCM2837_FSEL_REG(14));
 	// Configure GPIOs 14 & 15 for alternate function 5
 	i &= ~(BCM2837_FSEL_MASK(14));
 	i |= (BCM2837_FSEL_ALT5 << BCM2837_FSEL_OFFS(14));
@@ -813,6 +818,28 @@ SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) pi3_uart_serial_funct
 #endif /* PI3_UART */
 /*****************************************************************************/
 
+
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+static vm_offset_t ravyn_pl011_base;
+#define RPI5_UART_REG(off) (*(volatile uint32_t *)(ravyn_pl011_base + (off)))
+static void ravyn_pl011_init(void)
+{
+    /* Boot firmware/loader supplies the baud divisor. Preserve it. */
+    RPI5_UART_REG(0x38) = 0; /* polling: mask UART interrupts */
+    RPI5_UART_REG(0x44) = 0x7ff;
+    RPI5_UART_REG(0x2c) = 0x70; /* 8 bits, FIFO */
+    RPI5_UART_REG(0x30) = 0x301; /* UART, TX and RX enabled */
+}
+static int ravyn_pl011_tr0(void) { return !(RPI5_UART_REG(0x18) & (1u << 5)); }
+static void ravyn_pl011_td0(int c) { RPI5_UART_REG(0) = (uint32_t)c & 0xff; }
+static int ravyn_pl011_rr0(void) { return !(RPI5_UART_REG(0x18) & (1u << 4)); }
+static int ravyn_pl011_rd0(void) { return RPI5_UART_REG(0) & 0xff; }
+SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) ravyn_pl011_functions = {
+    .uart_init = ravyn_pl011_init, .tr0 = ravyn_pl011_tr0,
+    .td0 = ravyn_pl011_td0, .rr0 = ravyn_pl011_rr0, .rd0 = ravyn_pl011_rd0
+};
+#endif
+
 static void
 register_serial_functions(struct pe_serial_functions *fns)
 {
@@ -859,6 +886,17 @@ serial_init(void)
 		return 0;
 	}
 
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+    if (DTFindEntry("compatible", "arm,pl011", &entryP) == kSuccess) {
+        if (DTGetProperty(entryP, "reg", (void **)&reg_prop, &prop_size) != kSuccess ||
+            prop_size != 2 * sizeof(uintptr_t) || reg_prop[1] < 0x1000) {
+            panic("Ravyn PL011: invalid device-tree register tuple");
+        }
+        ravyn_pl011_base = ml_io_map(soc_base + reg_prop[0], reg_prop[1]);
+        if (!ravyn_pl011_base) panic("Ravyn PL011: unable to map UART");
+        register_serial_functions(&ravyn_pl011_functions);
+    }
+#endif
 #ifdef PI3_UART
 	if (DTFindEntry("name", "gpio", &entryP) == kSuccess) {
 		DTGetProperty(entryP, "reg", (void **)&reg_prop, &prop_size);

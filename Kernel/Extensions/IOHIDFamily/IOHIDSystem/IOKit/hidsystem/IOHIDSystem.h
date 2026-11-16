@@ -20,6 +20,11 @@
  *
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* 	Copyright (c) 1992 NeXT Computer, Inc.  All rights reserved.
  *
  * EventDriver.h - Exported Interface Event Driver object.
@@ -219,6 +224,12 @@ private:
           /* processKEQ*/bool         processKEQ = true,
           /* options*/   UInt32       options    = 0
                           );
+  // Native legacy pointing-device callbacks, serialized on the HID work loop.
+  struct LegacyPointerEvent;
+  static void legacyRelativePointer(OSObject *, int, int, int, AbsoluteTime, OSObject *, void *);
+  static void legacyAbsolutePointer(OSObject *, int, IOGPoint *, IOGBounds *, bool, int, int, AbsoluteTime, OSObject *, void *);
+  static void legacyScrollWheel(OSObject *, short, short, short, IOFixed, IOFixed, IOFixed, SInt32, SInt32, SInt32, SInt32, AbsoluteTime, OSObject *, void *);
+  static IOReturn legacyPointerGated(OSObject *, void *, void *, void *, void *);
   /* Dispatch mechanisms for screen state changes */
   void evDispatch(
             /* command */ EvCmd evcmd);

@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * NOTICE: This file was modified by SPARTA, Inc. in 2005 to introduce
  * support for mandatory and extensible security protections.  This notice
  * is included in support of clause 2.2 (b) of the Apple Public License,
@@ -3099,7 +3104,7 @@ getattrlist_internal(vfs_context_t ctx, vnode_t vp, struct attrlist  *alp,
 	    (options & FSOPT_NOFOLLOW) ? "no":"", vp->v_name);
 
 #if CONFIG_MACF
-	error = mac_vnode_check_getattrlist(ctx, vp, alp);
+	error = mac_vnode_check_getattrlist_v80(ctx, vp, alp, options);
 	if (error) {
 		goto out;
 	}

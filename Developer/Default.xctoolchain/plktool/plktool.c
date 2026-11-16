@@ -31,6 +31,15 @@
 
 extern CFMutableArrayRef __sOSAllKexts;
 
+Boolean gMontereySandboxV80 = false;
+unsigned gMontereySandboxV80Links = 0;
+Boolean gMontereyEndpointSecurityV80 = false;
+unsigned gMontereyEndpointSecurityV80Links = 0;
+Boolean gMontereyAMFIV80 = false;
+unsigned gMontereyAMFIV80Links = 0;
+Boolean gMontereyImage4V80 = false;
+unsigned gMontereyImage4V80Links = 0;
+
 const uint64_t __kOSKextMaxDisplacement = 2 * 1024 * 1024 * 1024ULL;
 
 char *
@@ -425,9 +434,24 @@ main(int argc, char **argv)
     CFArrayRef  kextArray = NULL;
     int         result = 1; /* assume something will fail */
 
+    while (argc > 1)
+    {
+        if (!strcmp(argv[1], "--monterey-sandbox-v80"))
+            gMontereySandboxV80 = true;
+        else if (!strcmp(argv[1], "--monterey-endpointsecurity-v80"))
+            gMontereyEndpointSecurityV80 = true;
+        else if (!strcmp(argv[1], "--monterey-amfi-v80"))
+            gMontereyAMFIV80 = true;
+        else if (!strcmp(argv[1], "--monterey-image4-v80"))
+            gMontereyImage4V80 = true;
+        else
+            break;
+        --argc; ++argv;
+    }
+
     if (argc < 4)
     {
-        fprintf(stdout, "plktool kernelcache kernel kext [kext ...]\n");
+        fprintf(stdout, "plktool [--monterey-sandbox-v80] [--monterey-endpointsecurity-v80] [--monterey-amfi-v80] [--monterey-image4-v80] kernelcache kernel kext [kext ...]\n");
         return 1;
     }
 
@@ -508,6 +532,27 @@ main(int argc, char **argv)
     if (!prelinkImage)
     {
         fprintf(stderr, "Failed to create prelinked kernel.\n");
+        goto finish;
+    }
+
+    if (gMontereySandboxV80 && gMontereySandboxV80Links != 1)
+    {
+        fprintf(stderr, "Monterey Sandbox option requires exactly one pinned donor link.\n");
+        goto finish;
+    }
+    if (gMontereyEndpointSecurityV80 && gMontereyEndpointSecurityV80Links != 1)
+    {
+        fprintf(stderr, "Monterey EndpointSecurity option requires exactly one pinned donor link.\n");
+        goto finish;
+    }
+    if (gMontereyAMFIV80 && gMontereyAMFIV80Links != 1)
+    {
+        fprintf(stderr, "Monterey AMFI option requires exactly one pinned donor link.\n");
+        goto finish;
+    }
+    if (gMontereyImage4V80 && gMontereyImage4V80Links != 1)
+    {
+        fprintf(stderr, "Monterey Image4 option requires exactly one pinned donor link.\n");
         goto finish;
     }
 

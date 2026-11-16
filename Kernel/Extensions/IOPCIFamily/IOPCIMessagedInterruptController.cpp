@@ -20,6 +20,11 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -371,6 +376,18 @@ IOReturn IOPCIMessagedInterruptController::allocateDeviceInterrupts(
     device = OSDynamicCast(IOPCIDevice, entry);
     if (!device) msiCapability = 0;
     msiPhysVectors = 0;
+
+    int nicOnly = 0;
+    PE_parse_boot_argn("ravyn_pci_msi_nic_only", &nicOnly, sizeof(nicOnly));
+    if (nicOnly && device)
+    {
+        uint32_t id = device->configRead32(kIOPCIConfigVendorID);
+        kprintf("RAVYN-MSI-REQUEST name=%s id=0x%08x allowed=%u\n",
+                device->getName(), id, id == 0x07b015ad);
+        // Diagnostic isolation: leave all other devices on their existing path.
+        // Reject before vector allocation or any MSI capability programming.
+        if (id != 0x07b015ad) return kIOReturnUnsupported;
+    }
 
     if (msiCapability)
     {

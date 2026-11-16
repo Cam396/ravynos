@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Copyright (c) 1998 Apple Computer, Inc.  All rights reserved.
  *
  * HISTORY
@@ -84,6 +89,21 @@ typedef void (*IOThreadFunc)(void *argument);
 void * IOMalloc(vm_size_t size)      __attribute__((alloc_size(1)));
 void * IOMallocZero(vm_size_t size)  __attribute__((alloc_size(1)));
 
+#if KERNEL_PRIVATE
+struct kalloc_type_view;
+struct kalloc_type_var_view;
+typedef struct kalloc_type_view *kalloc_type_view_t;
+typedef struct kalloc_type_var_view *kalloc_type_var_view_t;
+void *IOMallocZeroData(vm_size_t size);
+void *IOMallocData(vm_size_t size);
+void IOFreeData(void *address, vm_size_t size);
+void *IOMallocTypeImpl(kalloc_type_view_t view);
+void IOFreeTypeImpl(kalloc_type_view_t view, void *address);
+void *IOMallocTypeVarImpl(kalloc_type_var_view_t view, vm_size_t size);
+void IOFreeTypeVarImpl(kalloc_type_var_view_t view, void *address, vm_size_t size);
+#endif
+
+
 /*! @function IOFree
  *   @abstract Frees memory allocated with IOMalloc.
  *   @discussion This function frees memory allocated with IOMalloc, it may block and so should not be called from interrupt level or while a simple lock is held.
@@ -138,6 +158,7 @@ void   IOFreeContiguous(void * address, vm_size_t size) __attribute__((deprecate
  *   @param alignment Byte count of the alignment for the memory. For example, pass 256 to get memory allocated at an address with bits 0-7 zero.
  *   @result Pointer to the allocated memory, or zero on failure. */
 
+void * IOMallocPageableZero(vm_size_t size, vm_size_t alignment) __attribute__((alloc_size(1)));
 void * IOMallocPageable(vm_size_t size, vm_size_t alignment) __attribute__((alloc_size(1)));
 
 /*! @function IOFreePageable

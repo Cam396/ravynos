@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <arm/cpu_data_internal.h>
 #include <arm/misc_protos.h>
@@ -82,12 +87,31 @@ __options_decl(copyio_flags_t, uint32_t, {
 	COPYIO_ATOMIC                   = 0x0010,
 });
 
+#if defined(ARM64_BOARD_CONFIG_BCM2837) && !__ARM_PAN_AVAILABLE__
+/* This image also runs on A53, which lacks PAN. A76 implements PAN and
+ * exception entry enables it even though the legacy board config predates it.
+ * Detect the architectural feature before touching the PAN system register. */
+static inline boolean_t ravyn_cpu_has_pan(void)
+{
+    uint64_t features;
+    __asm__ volatile("mrs %0, ID_AA64MMFR1_EL1" : "=r"(features));
+    return ((features >> 20) & 0xf) != 0;
+}
+#endif
+
 static inline void
 user_access_enable(void)
 {
 #if __ARM_PAN_AVAILABLE__
 	assert(__builtin_arm_rsr("pan") != 0);
 	__builtin_arm_wsr("pan", 0);
+#elif defined(ARM64_BOARD_CONFIG_BCM2837)
+    if (ravyn_cpu_has_pan()) {
+        uint64_t pan;
+        __asm__ volatile("mrs %0, S3_0_C4_C2_3" : "=r"(pan));
+        assert(pan != 0);
+        __asm__ volatile("msr S3_0_C4_C2_3, %0" :: "r"((uint64_t)0) : "memory");
+    }
 #endif  /* __ARM_PAN_AVAILABLE__ */
 }
 
@@ -96,6 +120,9 @@ user_access_disable(void)
 {
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
+#elif defined(ARM64_BOARD_CONFIG_BCM2837)
+    if (ravyn_cpu_has_pan())
+        __asm__ volatile("msr S3_0_C4_C2_3, %0" :: "r"((uint64_t)(1ULL << 22)) : "memory");
 #endif  /* __ARM_PAN_AVAILABLE__ */
 }
 

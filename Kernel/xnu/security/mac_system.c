@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*-
  * Copyright (c) 1999, 2000, 2001, 2002 Robert N. M. Watson
@@ -219,8 +224,8 @@ mac_system_check_sysctlbyname(kauth_cred_t cred, const char *namestring, int *na
 	}
 #endif
 
-	MAC_CHECK(system_check_sysctlbyname, cred, namestring,
-	    name, namelen, oldctl, oldlen, newctl, newlen);
+	MAC_CHECK_ABI(system_check_sysctlbyname, (cred, namestring, name, namelen, oldctl, oldlen, newctl, newlen),
+	    (cred, namestring, name, (size_t)namelen, oldctl, oldlen, newctl, newlen), 1, 1);
 
 	return error;
 }

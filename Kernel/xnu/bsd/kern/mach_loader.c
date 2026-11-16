@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  *	Copyright (C) 1988, 1989,  NeXT, Inc.
  *
  *	File:	kern/mach_loader.c
@@ -69,6 +74,7 @@
 #include <kern/kern_types.h>
 #include <kern/cpu_number.h>
 #include <kern/mach_loader.h>
+#include <pexpert/pexpert.h>
 #include <kern/mach_fat.h>
 #include <kern/kalloc.h>
 #include <kern/task.h>
@@ -1494,28 +1500,38 @@ unprotect_dsmos_segment(
 	vm_map_size_t   map_size)
 {
 	kern_return_t   kr;
+	uint64_t        slice_off;
 
 	/*
 	 * The first APPLE_UNPROTECTED_HEADER_SIZE bytes (from offset 0 of
 	 * this part of a Universal binary) are not protected...
 	 * The rest needs to be "transformed".
 	 */
-	if (file_off <= APPLE_UNPROTECTED_HEADER_SIZE &&
-	    file_off + file_size <= APPLE_UNPROTECTED_HEADER_SIZE) {
+	slice_off = file_off - macho_offset;
+	if (slice_off <= APPLE_UNPROTECTED_HEADER_SIZE &&
+	    slice_off + file_size <= APPLE_UNPROTECTED_HEADER_SIZE) {
 		/* it's all unprotected, nothing to do... */
 		kr = KERN_SUCCESS;
 	} else {
-		if (file_off <= APPLE_UNPROTECTED_HEADER_SIZE) {
+		if (slice_off <= APPLE_UNPROTECTED_HEADER_SIZE) {
 			/*
 			 * We start mapping in the unprotected area.
 			 * Skip the unprotected part...
 			 */
-			vm_map_offset_t delta;
+			uint64_t delta_file;
+			vm_map_offset_t delta_map;
 
-			delta = APPLE_UNPROTECTED_HEADER_SIZE;
-			delta -= file_off;
-			map_addr += delta;
-			map_size -= delta;
+			delta_file = (uint64_t)APPLE_UNPROTECTED_HEADER_SIZE;
+			delta_file -= slice_off;
+			if (os_convert_overflow(delta_file, &delta_map)) {
+				return LOAD_BADMACHO;
+			}
+			if (os_add_overflow(map_addr, delta_map, &map_addr)) {
+				return LOAD_BADMACHO;
+			}
+			if (os_sub_overflow(map_size, delta_map, &map_size)) {
+				return LOAD_BADMACHO;
+			}
 		}
 		/* ... transform the rest of the mapping. */
 		struct pager_crypt_info crypt_info;
@@ -2768,6 +2784,12 @@ load_dylinker(
 		result->threadstate = myresult->threadstate;
 		result->threadstate_sz = myresult->threadstate_sz;
 
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+        int trace_arm_dyld=0;
+        if (PE_parse_boot_argn("ravyn_user_fault", &trace_arm_dyld, sizeof(trace_arm_dyld)) && trace_arm_dyld)
+            printf("RAVYN ARM DYLD MAP: header=0x%llx entry=0x%llx slide=0x%llx\n",
+                myresult->mach_header, myresult->entry_point, slide);
+#endif
 		result->dynlinker = TRUE;
 		result->entry_point = myresult->entry_point;
 		result->validentry = myresult->validentry;
@@ -2892,14 +2914,14 @@ load_code_signature(
 		goto out;
 	}
 
-	if (ubc_cs_blob_add(vp,
+	if (ubc_cs_blob_add_platform(vp,
 	    cputype,
 	    macho_offset,
 	    &addr,
 	    lcp->datasize,
 	    imgp,
 	    0,
-	    &blob)) {
+	    &blob, result->ip_platform)) {
 		if (addr) {
 			ubc_cs_blob_deallocate(addr, blob_size);
 			addr = 0;

@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* OSObject.cpp created by gvdl on Fri 1998-11-17 */
 
 #include <libkern/c++/OSObject.h>
@@ -311,6 +316,39 @@ OSObject::operator delete(void * mem, size_t size)
 #endif
 
 	kfree(mem, size);
+	OSIVAR_ACCUMSIZE(-size);
+}
+
+/* Match XNU8020's unprocessed external descriptor/default-heap path.
+ * Inherited structors may request more bytes than their parent's type. */
+void *
+OSObject_typed_operator_new(kalloc_type_view_t view, vm_size_t size)
+{
+#if IOTRACKING
+	if (kIOTracking & gIOKitDebug) return OSMetaClass::trackedNew(size);
+#endif
+	vm_size_t type_size = ravyn_kalloc_type_size(view);
+	void *mem = size <= type_size ?
+	    kalloc_type_impl_external(view, Z_WAITOK | Z_ZERO) :
+	    ravyn_kalloc_flags(size, Z_WAITOK | Z_ZERO);
+	assert(mem);
+	OSIVAR_ACCUMSIZE(size);
+	return mem;
+}
+
+void
+OSObject_typed_operator_delete(kalloc_type_view_t view, void *mem, vm_size_t size)
+{
+	if (!mem) return;
+#if IOTRACKING
+	if (kIOTracking & gIOKitDebug) return OSMetaClass::trackedDelete(mem, size);
+#endif
+	if (size <= ravyn_kalloc_type_size(view)) {
+		kfree_type_impl_external(view, mem);
+	} else {
+		if (ravyn_kalloc_is_data(mem)) panic("OSObject typed free: data heap mismatch");
+		kfree(mem, size);
+	}
 	OSIVAR_ACCUMSIZE(-size);
 }
 

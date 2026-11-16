@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <mach/machine.h>
 #include <mach/processor.h>
@@ -223,10 +228,11 @@ cpu_topology_start_cpu( int cpunum )
 
 	/* Decide whether to start a CPU, and actually start it */
 	TOPO_DBG("cpu_topology_start() processor_start():\n");
-	if (i < ncpus) {
+	if (i >= 0 && i < ncpus) {
 		TOPO_DBG("\tlcpu %d\n", cpu_datap(i)->cpu_number);
-		processor_start(cpu_datap(i)->cpu_processor);
-		return KERN_SUCCESS;
+		/* A failed CPU launch must reach the platform caller. Publishing
+		 * success here used to hide processor_start() failures. */
+		return processor_start(cpu_datap(i)->cpu_processor);
 	} else {
 		return KERN_FAILURE;
 	}

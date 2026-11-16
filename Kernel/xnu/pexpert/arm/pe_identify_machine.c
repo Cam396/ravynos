@@ -2,6 +2,11 @@
  * Copyright (c) 2007-2019 Apple Inc. All rights reserved.
  * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #include <pexpert/pexpert.h>
 #include <pexpert/boot.h>
 #include <pexpert/protos.h>
@@ -47,7 +52,7 @@ pe_identify_machine(boot_args * bootArgs)
 	OpaqueDTEntryIterator iter;
 	DTEntry         cpus, cpu;
 	uint32_t        mclk = 0, hclk = 0, pclk = 0, tclk = 0, use_dt = 0;
-	unsigned long  *value;
+	uint32_t       *value;
 	unsigned int    size;
 	int             err;
 
@@ -122,9 +127,8 @@ pe_identify_machine(boot_args * bootArgs)
 			/* Find the time base frequency first. */
 			if (DTGetProperty(cpu, "timebase-frequency", (void **)&value, &size) == kSuccess) {
 				/*
-				 * timebase_frequency_hz is only 32 bits, and
-				 * the device tree should never provide 64
-				 * bits so this if should never be taken.
+				 * A four-byte property stays four bytes on LP64.
+				 * The explicit cast below handles eight-byte cells.
 				 */
 				if (size == 8) {
 					gPEClockFrequencyInfo.timebase_frequency_hz = *(unsigned long long *)value;
@@ -654,10 +658,82 @@ pe_arm_map_interrupt_controller(void)
 	return 1;
 }
 
+
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+extern void rtclock_intr(unsigned int);
+static vm_offset_t ravyn_gic_dist, ravyn_gic_cpu;
+volatile uint64_t ravyn_gic_timer_irqs;
+#define RPI5_GICD(off) (*(volatile uint32_t *)(ravyn_gic_dist + (off)))
+#define RPI5_GICC(off) (*(volatile uint32_t *)(ravyn_gic_cpu + (off)))
+static void ravyn_gic_irq(void *target, void *refcon, void *nub, int source)
+{
+    (void)target; (void)refcon; (void)nub; (void)source;
+    uint32_t ack = RPI5_GICC(0x0c), irq = ack & 0x3ff;
+    if (irq >= 1020) return;
+    if (irq == 30) { /* ARM non-secure physical timer PPI */
+        ml_set_decrementer(0x7fffffff); /* deassert before dispatch/rearm */
+        ravyn_gic_timer_irqs++;
+        rtclock_intr(TRUE);
+    } else {
+        /* No peripheral driver has enabled another source at this stage. */
+        RPI5_GICD(0x180 + 4 * (irq / 32)) = 1u << (irq % 32);
+        __asm__ volatile("dsb sy" ::: "memory");
+        RPI5_GICC(0x10) = ack;
+        panic("Ravyn GICv2: unexpected enabled IRQ %u", irq);
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    RPI5_GICC(0x10) = ack;
+    __asm__ volatile("isb" ::: "memory");
+}
+static uint32_t ravyn_pi5_init_gic(void *args)
+{
+    DTEntry entry; uintptr_t *reg; unsigned int size;
+    if (!ravyn_gic_dist) {
+        if (DTFindEntry("compatible", "arm,gic-400", &entry) != kSuccess ||
+            DTGetProperty(entry, "reg", (void **)&reg, &size) != kSuccess ||
+            size < 4 * sizeof(uintptr_t) || reg[1] < 0x1000 || reg[3] < 0x2000)
+            panic("Ravyn GICv2: missing distributor/CPU register tuples");
+        vm_offset_t soc = pe_arm_get_soc_base_phys();
+        ravyn_gic_dist = ml_io_map(soc + reg[0], reg[1]);
+        ravyn_gic_cpu = ml_io_map(soc + reg[2], reg[3]);
+        if (!ravyn_gic_dist || !ravyn_gic_cpu) panic("Ravyn GICv2: mapping failed");
+        RPI5_GICD(0) = 0;
+        uint32_t lines = 32 * ((RPI5_GICD(4) & 31) + 1);
+        if (lines > 1020) lines = 1020;
+        for (uint32_t i = 0; i < (lines + 31) / 32; ++i) {
+            RPI5_GICD(0x180 + 4*i) = 0xffffffff; /* disable */
+            RPI5_GICD(0x280 + 4*i) = 0xffffffff; /* clear pending */
+        }
+        for (uint32_t i = 0; i < lines; i += 4)
+            RPI5_GICD(0x400 + i) = 0xa0a0a0a0;
+        /* Leave every peripheral disabled until a real driver owns it. */
+        __asm__ volatile("dsb sy" ::: "memory");
+        RPI5_GICD(0) = 1;
+        kprintf("Ravyn GICv2: mapped distributor/CPU interface, %u lines\n", lines);
+    }
+    if (args) {
+        RPI5_GICC(0) = 0;
+        RPI5_GICC(4) = 0xff;
+        RPI5_GICC(8) = 0;
+        RPI5_GICD(0x100) = 1u << 30;
+        RPI5_GICC(0) = 1;
+        ml_install_interrupt_handler(NULL, 0, NULL, ravyn_gic_irq, NULL);
+        __asm__ volatile("dsb sy; isb" ::: "memory");
+        kprintf("Ravyn GICv2: physical timer PPI30 enabled\n");
+    }
+    return 1;
+}
+#endif
+
 uint32_t
 pe_arm_init_interrupts(void *args)
 {
 	kprintf("pe_arm_init_interrupts: args: %p\n", args);
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+    if (!strcmp(gPESoCDeviceType, "ravyn,pi5-core-io"))
+        return ravyn_pi5_init_gic(args);
+#endif
+
 
 	/* Set up mappings for interrupt controller and possibly timers (if they haven't been set up already) */
 	if (args != NULL) {

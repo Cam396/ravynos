@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 
@@ -457,6 +462,18 @@ arm_init(
 
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
+#elif defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+    /* One image supports A53 without PAN and A76 with architectural PAN. */
+    /* The loader sets CNTVOFF=0 and the platform publishes CNTFRQ. Permit
+     * EL0 reads of the counters, while keeping timer programming privileged. */
+    uint64_t ravyn_cntkctl;
+    __asm__ volatile("mrs %0, CNTKCTL_EL1" : "=r"(ravyn_cntkctl));
+    ravyn_cntkctl |= 3;
+    __asm__ volatile("msr CNTKCTL_EL1, %0\n\tisb" :: "r"(ravyn_cntkctl) : "memory");
+    uint64_t ravyn_mmfr1;
+    __asm__ volatile("mrs %0, ID_AA64MMFR1_EL1" : "=r"(ravyn_mmfr1));
+    if (((ravyn_mmfr1 >> 20) & 0xf) != 0)
+        __asm__ volatile("msr S3_0_C4_C2_3, %0" :: "r"((uint64_t)(1ULL << 22)) : "memory");
 #endif  /* __ARM_PAN_AVAILABLE__ */
 
 	arm_vm_init(xmaxmem, args);
@@ -578,6 +595,18 @@ arm_init_cpu(
 {
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
+#elif defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+    /* One image supports A53 without PAN and A76 with architectural PAN. */
+    /* The loader sets CNTVOFF=0 and the platform publishes CNTFRQ. Permit
+     * EL0 reads of the counters, while keeping timer programming privileged. */
+    uint64_t ravyn_cntkctl;
+    __asm__ volatile("mrs %0, CNTKCTL_EL1" : "=r"(ravyn_cntkctl));
+    ravyn_cntkctl |= 3;
+    __asm__ volatile("msr CNTKCTL_EL1, %0\n\tisb" :: "r"(ravyn_cntkctl) : "memory");
+    uint64_t ravyn_mmfr1;
+    __asm__ volatile("mrs %0, ID_AA64MMFR1_EL1" : "=r"(ravyn_mmfr1));
+    if (((ravyn_mmfr1 >> 20) & 0xf) != 0)
+        __asm__ volatile("msr S3_0_C4_C2_3, %0" :: "r"((uint64_t)(1ULL << 22)) : "memory");
 #endif
 
 
@@ -669,6 +698,18 @@ arm_init_idle_cpu(
 {
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
+#elif defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+    /* One image supports A53 without PAN and A76 with architectural PAN. */
+    /* The loader sets CNTVOFF=0 and the platform publishes CNTFRQ. Permit
+     * EL0 reads of the counters, while keeping timer programming privileged. */
+    uint64_t ravyn_cntkctl;
+    __asm__ volatile("mrs %0, CNTKCTL_EL1" : "=r"(ravyn_cntkctl));
+    ravyn_cntkctl |= 3;
+    __asm__ volatile("msr CNTKCTL_EL1, %0\n\tisb" :: "r"(ravyn_cntkctl) : "memory");
+    uint64_t ravyn_mmfr1;
+    __asm__ volatile("mrs %0, ID_AA64MMFR1_EL1" : "=r"(ravyn_mmfr1));
+    if (((ravyn_mmfr1 >> 20) & 0xf) != 0)
+        __asm__ volatile("msr S3_0_C4_C2_3, %0" :: "r"((uint64_t)(1ULL << 22)) : "memory");
 #endif
 #if     __ARM_SMP__ && defined(ARMA7)
 	cpu_data_ptr->cpu_CLW_active = 1;

@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <kern/locks.h>
 #include <kern/cpu_number.h>
@@ -278,6 +283,79 @@ register_and_init_prng(struct cckprng_ctx *ctx, const struct cckprng_funcs *func
 
 	cc_clear(sizeof(bootseed), bootseed);
 	cc_clear(sizeof(erandom), &erandom);
+}
+
+/* Exact later-Monterey PRNG registration. Its first init callback is now
+ * seven arguments; use its real eight-argument compatibility initializer,
+ * with a callback over the existing interrupt timing accumulator. */
+typedef int32_t (*ravyn_prng_getentropy_fn)(size_t *, void *, void *);
+struct ravyn_prng_funcs_v21 {
+    void (*init)(struct cckprng_ctx *, size_t, const void *, size_t,
+        const void *, ravyn_prng_getentropy_fn, void *);
+    void (*initgen)(struct cckprng_ctx *, unsigned);
+    void (*reseed)(struct cckprng_ctx *, size_t, const void *);
+    void (*refresh)(struct cckprng_ctx *);
+    void (*generate)(struct cckprng_ctx *, unsigned, size_t, void *);
+    void (*init_with_getentropy)(struct cckprng_ctx *, unsigned, size_t,
+        const void *, size_t, const void *, ravyn_prng_getentropy_fn, void *);
+};
+static uint32_t ravyn_prng_last_sample;
+
+static int32_t
+ravyn_prng_getentropy(size_t *nbytes, void *entropy, void *arg)
+{
+    if (!nbytes) return -1;
+    if (!entropy || !arg || *nbytes < sizeof(EntropyData.buffer)) {
+        *nbytes = 0;
+        return -1;
+    }
+    uint32_t *last = arg;
+    uint32_t previous, current;
+    do {
+        previous = __atomic_load_n(last, __ATOMIC_RELAXED);
+        current = __atomic_load_n(&EntropyData.sample_count, __ATOMIC_RELAXED);
+        if (current == previous) {
+            *nbytes = 0;
+            return 0;
+        }
+        /* ml_entropy_collect rotates/XORs real interrupt TSC samples into
+         * this existing buffer. As on the legacy path, sampling tolerates
+         * concurrent accumulator updates; counts are raw samples, not bits.
+         * CAS prevents separate refresh callers from crediting them twice. */
+        for (unsigned i = 0; i < ENTROPY_BUFFER_SIZE; i++) {
+            uint32_t word = __atomic_load_n(&EntropyData.buffer[i], __ATOMIC_RELAXED);
+            __builtin_memcpy((uint8_t *)entropy + i * sizeof(word), &word, sizeof(word));
+        }
+    } while (!__atomic_compare_exchange_n(last, &previous, current, FALSE,
+        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    *nbytes = sizeof(EntropyData.buffer);
+    uint32_t samples = current - previous;
+    return samples > 0x7fffffffU ? 0x7fffffff : (int32_t)samples;
+}
+
+void
+register_and_init_prng_v21(struct cckprng_ctx *ctx, const struct ravyn_prng_funcs_v21 *funcs)
+{
+    if (!ctx || !funcs || !funcs->init_with_getentropy || !funcs->initgen ||
+        !funcs->reseed || !funcs->refresh || !funcs->generate || prng_ready ||
+        cpu_number() != master_cpu)
+        panic("PRNG21: invalid or duplicate registration");
+    prng_ctx = ctx;
+    prng_funcs.init = NULL; /* old nine-argument initializer is never invoked */
+    prng_funcs.initgen = funcs->initgen;
+    prng_funcs.reseed = funcs->reseed;
+    prng_funcs.refresh = funcs->refresh;
+    prng_funcs.generate = funcs->generate;
+    uint64_t nonce = ml_get_timebase();
+    funcs->init_with_getentropy(ctx, MAX_CPUS, sizeof(bootseed), bootseed,
+        sizeof(nonce), &nonce, ravyn_prng_getentropy, &ravyn_prng_last_sample);
+    prng_funcs.initgen(ctx, master_cpu);
+    prng_ready = 1;
+    cc_clear(sizeof(bootseed), bootseed);
+    cc_clear(sizeof(erandom), &erandom);
+    cc_clear(sizeof(nonce), &nonce);
+    kprintf("RAVYN_PRNG21_REGISTER real_seed=1 interrupt_entropy_bytes=%u\n",
+        (unsigned)sizeof(EntropyData.buffer));
 }
 
 void

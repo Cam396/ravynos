@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 /* 
@@ -672,5 +677,20 @@ routine	mach_port_kobject_description(
 	out	object_type	: natural_t;
 	out	object_addr	: mach_vm_address_t;
 	out     description     : kobject_description_t);
+
+/* Keep Monterey post-Darwin-19 message IDs stable. */
+routine mach_port_is_connection_for_service(
+		task               : ipc_space_t;
+		connection_port    : mach_port_name_t;
+		service_port       : mach_port_name_t;
+	out	filter_policy_id   : uint64_t
+);
+skip; /* mach_port_get_service_port_info (3241) */
+
+routine mach_port_assert_attributes(
+		task		: ipc_space_t;
+		name		: mach_port_name_t;
+		flavor		: mach_port_flavor_t;
+		info		: mach_port_info_t);
 
 /* vim: set ft=c : */

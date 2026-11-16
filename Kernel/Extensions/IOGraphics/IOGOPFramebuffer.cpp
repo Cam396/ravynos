@@ -25,7 +25,12 @@
 #include "IOGOPFramebuffer.h"
 
 #define kDisplayModeID 1
-#define kDepth         32 /* GOP is always 32 */
+
+#ifndef GRAPHICS_MODE
+/* ARM64 selects the graphics console when Boot_Video.v_display is nonzero. */
+#define GRAPHICS_MODE 1
+#endif
+#define kDepthIndex    0  /* One 32-bit pixel format, at depth index zero. */
 
 #define DEBUG(x, ...) kprintf("IOGOPFramebuffer: " x, ##__VA_ARGS__)
 
@@ -61,7 +66,13 @@ IOGOPFramebuffer::start(IOService *provider)
         DEBUG("no framebuffer base address\n");
         return false;
     }
+    // PE console addresses carry low-bit mapping flags, not pixel offsets.
+    // initialize_screen() strips these same two bits before physical mapping.
+    const unsigned long rawConsoleBase = bootDisplay.v_baseAddr;
+    bootDisplay.v_baseAddr &= ~3UL;
     fbBase = (void *)bootDisplay.v_baseAddr;
+    kprintf("RAVYN-GOP-BASE raw=0x%lx physical=0x%lx flags=%lu\n",
+            rawConsoleBase, bootDisplay.v_baseAddr, rawConsoleBase & 3UL);
     width  = bootDisplay.v_width;
     height = bootDisplay.v_height;
     pitch  = bootDisplay.v_rowBytes;
@@ -84,15 +95,27 @@ IOGOPFramebuffer::start(IOService *provider)
 
     // Initialize graphics console with this framebuffer
     // Use the public IOPlatformExpert::setConsoleInfo() method
-    IOReturn ret = pe->setConsoleInfo(&consoleInfo, kPEAcquireScreen)
-                | pe->setConsoleInfo(&consoleInfo, kPEGraphicsMode)
-                | pe->setConsoleInfo(&consoleInfo, kPEEnableScreen);
+    IOReturn ret = pe->setConsoleInfo(&consoleInfo, kPEAcquireScreen);
+    ret |= pe->setConsoleInfo(&consoleInfo, kPEGraphicsMode);
+    ret |= pe->setConsoleInfo(&consoleInfo, kPEEnableScreen);
     if (ret != kIOReturnSuccess) {
         DEBUG("setConsoleInfo failed: %d\n", ret);
         // Don't fail - we can still register the service even if console init fails
     } else {
         DEBUG("Kernel graphics console initialized\n");
     }
+
+#if defined(RAVYN_ARM64_STATIC_IOGRAPHICS)
+    /*
+     * Acquiring graphics mode intentionally discards the terminal buffers.
+     * This raw-kernel target has no later display-driver open to select the
+     * verbose console, so complete that standard transition here when asked.
+     */
+    if (PE_parse_boot_argn("-v", NULL, 0)) {
+        ret = pe->setConsoleInfo(NULL, kPETextScreen);
+        DEBUG("Verbose text console selected: 0x%x\n", ret);
+    }
+#endif
 
     setupForCurrentConfig(); // full setup
     registerService();
@@ -117,6 +140,27 @@ IOReturn
 IOGOPFramebuffer::enableController()
 {
     return kIOReturnSuccess;
+}
+
+IOReturn
+IOGOPFramebuffer::getAttributeForConnection(IOIndex connectIndex,
+                                           IOSelect attribute, uintptr_t *value)
+{
+    if (connectIndex != 0 || !value)
+        return kIOReturnBadArgument;
+    switch (attribute) {
+        case kConnectionFlags:
+            /* Fixed GOP scanout, without built-in-panel or stereo features. */
+            *value = 0;
+            return kIOReturnSuccess;
+        case kConnectionEnable:
+        case kConnectionCheckEnable:
+            /* The single firmware-provided scanout is already active. */
+            *value = 1;
+            return kIOReturnSuccess;
+        default:
+            return super::getAttributeForConnection(connectIndex, attribute, value);
+    }
 }
 
 const char *
@@ -150,8 +194,9 @@ IOReturn
 IOGOPFramebuffer::getCurrentDisplayMode(IODisplayModeID * displayMode,
                                         IOIndex         * depth)
 {
-    *displayMode = kDisplayModeID;
-    *depth = kDepth;
+    if (displayMode) *displayMode = kDisplayModeID;
+    if (depth) *depth = kDepthIndex;
+    DEBUG("current mode=%u depth-index=%u\n", kDisplayModeID, kDepthIndex);
     return kIOReturnSuccess;
 }
 
@@ -159,7 +204,8 @@ IOReturn
 IOGOPFramebuffer::setDisplayMode(IODisplayModeID displayMode,
                                  IOIndex depth)
 {
-    return kIOReturnSuccess;
+    return (displayMode == kDisplayModeID && depth == kDepthIndex)
+        ? kIOReturnSuccess : kIOReturnUnsupportedMode;
 }
 
 IODeviceMemory *
@@ -172,25 +218,32 @@ IOGOPFramebuffer::getApertureRange(IOPixelAperture)
 }
 
 IOReturn
-IOGOPFramebuffer::getInformationForDisplayMode(IODisplayModeID,
+IOGOPFramebuffer::getInformationForDisplayMode(IODisplayModeID displayMode,
                                                IODisplayModeInformation * info)
 {
+    if (!info)
+        return kIOReturnBadArgument;
+    if (displayMode != kDisplayModeID)
+        return kIOReturnUnsupportedMode;
     bzero(info, sizeof(*info));
 
     info->nominalWidth  = width;
     info->nominalHeight = height;
     info->refreshRate   = 60 << 16;
 
-    info->maxDepthIndex = kDepth;
+    info->maxDepthIndex = kDepthIndex;
+    /* This is the firmware-selected, currently scanning-out fixed mode. */
+    info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
 
     return kIOReturnSuccess;
 }
 
 UInt64
-IOGOPFramebuffer::getPixelFormatsForDisplayMode(IODisplayModeID,
-                                                IOIndex)
+IOGOPFramebuffer::getPixelFormatsForDisplayMode(IODisplayModeID displayMode,
+                                                IOIndex depth)
 {
-    return (UInt64)(uintptr_t)getPixelFormats();
+    // Bit zero selects the first format returned by getPixelFormats().
+    return (displayMode == kDisplayModeID && depth == kDepthIndex) ? 1ULL : 0ULL;
 }
 
 IOItemCount

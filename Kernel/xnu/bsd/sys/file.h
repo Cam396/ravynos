@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995, 1997 Apple Computer, Inc. All Rights Reserved */
 /*
  * Copyright (c) 1982, 1986, 1989, 1993
@@ -101,6 +106,7 @@ struct fileglob;
 struct fileproc;
 struct vnode;
 int fp_getfvp(struct proc *p, int fd, struct fileproc **resultfp, struct vnode  **resultvp);
+int fp_get_pipe_id(proc_t p, int fd, uint64_t *result_pipe_id);
 struct vnode *fg_get_vnode(struct fileglob *fg);
 #endif  /* KERNEL_PRIVATE */
 __END_DECLS

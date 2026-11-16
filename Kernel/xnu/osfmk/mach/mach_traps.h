@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -161,6 +166,10 @@ extern kern_return_t _kernelrpc_mach_vm_deallocate_trap(
 	mach_vm_address_t address,
 	mach_vm_size_t size
 	);
+
+extern kern_return_t task_dyld_process_info_notify_get(
+	mach_port_name_array_t names_addr,
+	natural_t *names_count_addr);
 
 extern kern_return_t _kernelrpc_mach_vm_protect_trap(
 	mach_port_name_t target,
@@ -667,6 +676,13 @@ struct _kernelrpc_mach_vm_deallocate_args {
 };                                              /* Total: 5 */
 extern kern_return_t _kernelrpc_mach_vm_deallocate_trap(
 	struct _kernelrpc_mach_vm_deallocate_args *args);
+
+struct task_dyld_process_info_notify_get_trap_args {
+	PAD_ARG_(mach_vm_address_t, names_addr);
+	PAD_ARG_(mach_vm_address_t, names_count_addr);
+};
+extern kern_return_t task_dyld_process_info_notify_get_trap(
+	struct task_dyld_process_info_notify_get_trap_args *args);
 
 struct _kernelrpc_mach_vm_protect_args {
 	PAD_ARG_(mach_port_name_t, target);     /* 1 word */

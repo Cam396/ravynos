@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 
@@ -64,6 +69,11 @@
 	void*                   task_debug; \
 	uint64_t rop_pid; \
 	boolean_t disable_user_jop;
+#elif defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+/* Architectural PAuth reference path, independent of Apple's PAC registers. */
+#define MACHINE_TASK \
+    void* task_debug; \
+    uint64_t ravyn_user_pauth_keys[10];
 #else
 #define MACHINE_TASK \
 	void*                   task_debug;

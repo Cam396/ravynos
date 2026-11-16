@@ -19,9 +19,15 @@
  *
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <IOKit/pwr_mgt/RootDomain.h>
 #include <IOKit/IOLib.h>
+#include <pexpert/pexpert.h>
 #include <IOKit/IOMessage.h>
 #include <libkern/c++/OSContainers.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -40,6 +46,15 @@
 #define COUNT_OF(x) \
     ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
 #define IOUCACTION(f) static_cast<IOExternalMethodAction>(f)
+
+static bool
+RavynFramebufferTraceEnabled(IOFramebuffer * framebuffer)
+{
+	uint32_t enabled = 0;
+	return framebuffer
+	    && PE_parse_boot_argn("ravyn_fbtrace", &enabled, sizeof(enabled))
+	    && enabled;
+}
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -164,8 +179,15 @@ registerNotificationPort(mach_port_t         port,
 // user space RPCs.
 IOReturn IOFramebufferUserClient::clientClose( void )
 {
+    const bool traceFramebuffer = RavynFramebufferTraceEnabled(fOwner);
+    if (traceFramebuffer) {
+        IOLog("RavynFBTrace: clientClose begin client=%p owner=%p\n", this, fOwner);
+    }
     DEBG(fName, "\n");
     terminate();
+    if (traceFramebuffer) {
+        IOLog("RavynFBTrace: clientClose done client=%p\n", this);
+    }
     return (kIOReturnSuccess);
 }
 
@@ -231,6 +253,9 @@ void IOFramebufferUserClient::stop(IOService *provider)
 IOService * IOFramebufferUserClient::getService( void )
 {
     IOFBUC_START(getService,0,0,0);
+    if (RavynFramebufferTraceEnabled(fOwner)) {
+        IOLog("RavynFBTrace: getService client=%p owner=%p\n", this, fOwner);
+    }
     DEBG(fName, "\n");
     IOFBUC_END(getService,0,0,0);
     return (fOwner);
@@ -241,6 +266,11 @@ IOReturn IOFramebufferUserClient::clientMemoryForType( UInt32 type,
 {
     IOFBUC_START(clientMemoryForType,type,0,0);
     DEBG(fName, "\n");
+
+    const bool traceFramebuffer = RavynFramebufferTraceEnabled(fOwner);
+    if (traceFramebuffer) {
+        IOLog("RavynFBTrace: memory begin client=%p type=%u owner=%p\n", this, type, fOwner);
+    }
 
     static bool          havePublishedResource;
     IOMemoryDescriptor * mem = NULL;
@@ -279,6 +309,10 @@ IOReturn IOFramebufferUserClient::clientMemoryForType( UInt32 type,
         err = (mem) ? kIOReturnSuccess : kIOReturnBadArgument;
     }
 
+    if (traceFramebuffer) {
+        IOLog("RavynFBTrace: memory done type=%u result=0x%08x descriptor=%p length=%llu\n",
+            type, err, mem, mem ? mem->getLength() : 0);
+    }
     IOFBUC_END(clientMemoryForType,err,0,0);
     return (err);
 }
@@ -309,6 +343,12 @@ IOReturn IOFramebufferUserClient::externalMethod( uint32_t selector, IOExternalM
 {
     IOFBUC_START(externalMethod,selector,0,0);
     IOReturn    ret = kIOReturnSuccess;
+
+    const bool traceFramebuffer = RavynFramebufferTraceEnabled(fOwner);
+    if (traceFramebuffer) {
+        IOLog("RavynFBTrace: external begin client=%p selector=%u owner=%p args=%p\n",
+            this, selector, fOwner, args);
+    }
 
     static const IOExternalMethodDispatch methodTemplate[] =
     {
@@ -358,6 +398,9 @@ IOReturn IOFramebufferUserClient::externalMethod( uint32_t selector, IOExternalM
 
     if (selector >= COUNT_OF(methodTemplate))
     {
+        if (traceFramebuffer) {
+            IOLog("RavynFBTrace: external reject selector=%u\n", selector);
+        }
         IOFBUC_END(externalMethod,kIOReturnBadArgument,0,0);
         return (kIOReturnBadArgument);
     }
@@ -367,6 +410,9 @@ IOReturn IOFramebufferUserClient::externalMethod( uint32_t selector, IOExternalM
                     const_cast<IOExternalMethodDispatch *>(&methodTemplate[selector]), 
                     fOwner, fOther);
 
+    if (traceFramebuffer) {
+        IOLog("RavynFBTrace: external done selector=%u result=0x%08x\n", selector, ret);
+    }
     IOFBUC_END(externalMethod,ret,0,0);
     return (ret);
 }

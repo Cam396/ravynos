@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -84,6 +89,7 @@
 #include <kern/ipc_kobject.h>
 #include <kern/ipc_mig.h>
 #include <kern/task.h>
+#include <kern/mach_filter.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
 #include <kern/exception.h>
@@ -157,6 +163,70 @@ mach_msg_receive_results_complete(ipc_object_t object);
 
 const security_token_t KERNEL_SECURITY_TOKEN = KERNEL_SECURITY_TOKEN_VALUE;
 const audit_token_t KERNEL_AUDIT_TOKEN = KERNEL_AUDIT_TOKEN_VALUE;
+
+/* Callback storage is immutable after the first successful registration. */
+struct mach_msg_filter_callbacks mach_msg_filter_callbacks;
+static volatile uint32_t mach_msg_filter_callback_state;
+
+kern_return_t
+mach_msg_filter_register_callback(
+    const struct mach_msg_filter_callbacks *callbacks)
+{
+    size_t size;
+    if (callbacks == NULL || callbacks->version > MACH_MSG_FILTER_CALLBACKS_VERSION_1 ||
+        callbacks->fetch_filter_policy == NULL) {
+        return KERN_INVALID_ARGUMENT;
+    }
+
+    if (callbacks->version == MACH_MSG_FILTER_CALLBACKS_VERSION_0) {
+        size = offsetof(struct mach_msg_filter_callbacks, alloc_service_port_sblabel);
+    } else {
+        if (callbacks->alloc_service_port_sblabel == NULL ||
+            callbacks->dealloc_service_port_sblabel == NULL ||
+            callbacks->derive_sblabel_from_service_port == NULL ||
+            callbacks->get_connection_port_filter_policy == NULL ||
+            callbacks->retain_sblabel == NULL) {
+            return KERN_INVALID_ARGUMENT;
+        }
+        size = sizeof(*callbacks);
+    }
+
+    if (!os_atomic_cmpxchg(&mach_msg_filter_callback_state, 0, 1, acquire)) {
+        return KERN_FAILURE;
+    }
+    memcpy(&mach_msg_filter_callbacks, callbacks, size);
+    os_atomic_store(&mach_msg_filter_callback_state, 2, release);
+    return KERN_SUCCESS;
+}
+
+boolean_t
+mach_msg_filter_at_least(unsigned int version)
+{
+    if (os_atomic_load(&mach_msg_filter_callback_state, acquire) != 2) {
+        return FALSE;
+    }
+    if (version == MACH_MSG_FILTER_CALLBACKS_VERSION_0) {
+        return mach_msg_filter_callbacks.fetch_filter_policy != NULL;
+    }
+    return mach_msg_filter_callbacks.version >= version;
+}
+
+boolean_t
+mach_msg_fetch_filter_policy(
+    void *portlabel,
+    mach_msg_id_t msgh_id,
+    mach_msg_filter_id *fid)
+{
+    if (fid == NULL) {
+        return FALSE;
+    }
+    *fid = MACH_MSG_FILTER_POLICY_ALLOW;
+    if (os_atomic_load(&mach_msg_filter_callback_state, acquire) != 2 ||
+        mach_msg_fetch_filter_policy_callback == NULL) {
+        return TRUE;
+    }
+    return mach_msg_fetch_filter_policy_callback(current_task(), portlabel, msgh_id, fid);
+}
 
 mach_msg_format_0_trailer_t trailer_template = {
 	/* mach_msg_trailer_type_t */ MACH_MSG_TRAILER_FORMAT_0,
@@ -250,7 +320,7 @@ mach_msg_send(
 	trailer->msgh_trailer_type = MACH_MSG_TRAILER_FORMAT_0;
 	trailer->msgh_trailer_size = MACH_MSG_TRAILER_MINIMUM_SIZE;
 
-	mr = ipc_kmsg_copyin(kmsg, space, map, override, &option);
+	mr = ipc_kmsg_copyin(kmsg, space, map, override, &option, FALSE, FALSE);
 
 	if (mr != MACH_MSG_SUCCESS) {
 		ipc_kmsg_free(kmsg);
@@ -509,6 +579,7 @@ mach_msg_overwrite_trap(
 {
 	mach_vm_address_t       msg_addr = args->msg;
 	mach_msg_option_t       option = args->option;
+	boolean_t               filter_nonfatal = (option & MACH_SEND_FILTER_NONFATAL) != 0;
 	mach_msg_size_t         send_size = args->send_size;
 	mach_msg_size_t         rcv_size = args->rcv_size;
 	mach_port_name_t        rcv_name = args->rcv_name;
@@ -542,7 +613,8 @@ mach_msg_overwrite_trap(
 		    0, 0,
 		    0);
 
-		mr = ipc_kmsg_copyin(kmsg, space, map, override, &option);
+		mr = ipc_kmsg_copyin(kmsg, space, map, override, &option,
+		    TRUE, filter_nonfatal);
 
 		if (mr != MACH_MSG_SUCCESS) {
 			ipc_kmsg_free(kmsg);

@@ -19,6 +19,11 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <IOKit/assert.h>
 #include <IOKit/IOService.h>
@@ -201,6 +206,7 @@ void ApplePS2Controller::free(void)
 
 bool ApplePS2Controller::start(IOService * provider)
 {
+  kprintf("ApplePS2Controller: start\n");
   //
   // The driver has been instructed to start.  Allocate all our resources.
   //
@@ -230,9 +236,11 @@ bool ApplePS2Controller::start(IOService * provider)
   // port routines directly, since no other thread will conflict with us.
   //
 
+  kprintf("ApplePS2Controller: configuring controller\n");
   UInt8 commandByte;
   writeCommandPort(kCP_GetCommandByte);
   commandByte  =  readDataPort(kDT_Keyboard);
+  IOLog("ApplePS2Controller: firmware command byte 0x%02x\n", commandByte);
   commandByte &= ~(kCB_EnableMouseIRQ | kCB_DisableMouseClock);
   writeCommandPort(kCP_SetCommandByte);
   writeDataPort(commandByte);
@@ -249,6 +257,7 @@ bool ApplePS2Controller::start(IOService * provider)
   // the work loop.
   //
 
+  kprintf("ApplePS2Controller: draining controller\n");
   while ( inb(kCommandPort) & kOutputReady )
   {
     IODelay(kDataDelay);
@@ -260,6 +269,7 @@ bool ApplePS2Controller::start(IOService * provider)
   // Use a spin lock to protect the client async request queue.
   //
 
+  kprintf("ApplePS2Controller: creating work loop\n");
   _requestQueueLock = IOSimpleLockAlloc();
   if (!_requestQueueLock) goto fail;
 
@@ -317,6 +327,7 @@ bool ApplePS2Controller::start(IOService * provider)
   // and should they exist, will attach themselves to the nub as clients.
   //
 
+  kprintf("ApplePS2Controller: creating keyboard device\n");
   _keyboardDevice = new ApplePS2KeyboardDevice;
 
   if ( !_keyboardDevice               ||
@@ -329,6 +340,7 @@ bool ApplePS2Controller::start(IOService * provider)
        !_mouseDevice->init()       ||
        !_mouseDevice->attach(this) )  goto fail;
 
+  kprintf("ApplePS2Controller: publishing devices\n");
   gApplePS2Controller = this;
 
   _keyboardDevice->registerService();

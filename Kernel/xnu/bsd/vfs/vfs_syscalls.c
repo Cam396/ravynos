@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -2814,6 +2819,14 @@ quotactl(proc_t p, struct quotactl_args *uap, __unused int32_t *retval)
 	vnode_put(nd.ni_vp);
 	nameidone(&nd);
 
+
+#if CONFIG_MACF
+	error = mac_mount_check_quotactl(ctx, mp, uap->cmd, uap->uid);
+	if (error != 0) {
+		goto mac_quota_out;
+	}
+#endif
+
 	/* copyin any data we will need for downstream code */
 	quota_cmd = uap->cmd >> SUBCMDSHIFT;
 
@@ -2885,6 +2898,10 @@ quotactl(proc_t p, struct quotactl_args *uap, __unused int32_t *retval)
 		break;
 	} /* switch */
 
+
+#if CONFIG_MACF
+mac_quota_out:
+#endif
 	mount_drop(mp, 0);
 	return error;
 }
@@ -7599,6 +7616,15 @@ copyfile(__unused proc_t p, struct copyfile_args *uap, __unused int32_t *retval)
 		goto out;
 	}
 
+
+#if CONFIG_MACF
+	error = mac_vnode_check_copyfile(ctx, tdvp, tvp, fvp, &tond.ni_cnd,
+	    (mode_t)uap->mode, uap->flags);
+	if (error != 0) {
+		goto out;
+	}
+#endif
+
 	/* This calls existing MAC hooks for open  */
 	if ((error = vn_authorize_open_existing(fvp, &fromnd.ni_cnd, FREAD, ctx,
 	    NULL))) {
@@ -8737,6 +8763,16 @@ renameat(__unused proc_t p, struct renameat_args *uap, __unused int32_t *retval)
 	           uap->tofd, uap->to, UIO_USERSPACE, 0);
 }
 
+static int
+ravyn_logd_timesync_mkdir(vfs_context_t ctx, const struct componentname *cnp)
+{
+	proc_t p = vfs_context_proc(ctx);
+
+	return p != NULL && !strcmp(p->p_comm, "logd") &&
+	    cnp != NULL && cnp->cn_nameptr != NULL &&
+	    cnp->cn_namelen == 8 && !strncmp(cnp->cn_nameptr, "timesync", 8);
+}
+
 /*
  * Make a directory file.
  *
@@ -8755,6 +8791,7 @@ mkdir1at(vfs_context_t ctx, user_addr_t path, struct vnode_attr *vap, int fd,
 	int error;
 	int update_flags = 0;
 	int batched;
+	int ravyn_trace;
 	struct nameidata nd;
 
 	AUDIT_ARG(mode, vap->va_mode);
@@ -8768,6 +8805,7 @@ continue_lookup:
 	if (error) {
 		return error;
 	}
+	ravyn_trace = ravyn_logd_timesync_mkdir(ctx, &nd.ni_cnd);
 	dvp = nd.ni_dvp;
 	vp = nd.ni_vp;
 
@@ -8787,7 +8825,11 @@ continue_lookup:
 	 * EACCESS/EPERM--so if we authorize for mkdir on "/" for "mkdir -p /tmp/foo/bar/baz"
 	 * it will fail in a spurious  manner.  Need to figure out if this is valid behavior.
 	 */
-	if ((error = vn_authorize_mkdir(dvp, &nd.ni_cnd, vap, ctx, NULL)) != 0) {
+	error = vn_authorize_mkdir(dvp, &nd.ni_cnd, vap, ctx, NULL);
+	if (ravyn_trace) {
+		printf("RAVYN-MKDIR-TRACE stage=authorize-return error=%d%c", error, 10);
+	}
+	if (error != 0) {
 		if (error == EACCES || error == EPERM) {
 			int error2;
 
@@ -8817,7 +8859,11 @@ continue_lookup:
 	/*
 	 * make the directory
 	 */
-	if ((error = vn_create(dvp, &vp, &nd, vap, 0, 0, NULL, ctx)) != 0) {
+	error = vn_create(dvp, &vp, &nd, vap, 0, 0, NULL, ctx);
+	if (ravyn_trace) {
+		printf("RAVYN-MKDIR-TRACE stage=vn-create error=%d%c", error, 10);
+	}
+	if (error != 0) {
 		if (error == EKEEPLOOKING) {
 			nd.ni_vp = vp;
 			goto continue_lookup;
@@ -10154,7 +10200,7 @@ searchfs(proc_t p, struct searchfs_args *uap, __unused int32_t *retval)
 	}
 
 #if CONFIG_MACF
-	error = mac_vnode_check_searchfs(ctx, vp, &searchblock.searchattrs);
+	error = mac_vnode_check_searchfs_v80(ctx, vp, returnattrs, &searchblock.searchattrs);
 	if (error) {
 		vnode_put(vp);
 		goto freeandexit;
@@ -11340,7 +11386,7 @@ fsctl(proc_t p, struct fsctl_args *uap, __unused int32_t *retval)
 	nameidone(&nd);
 
 #if CONFIG_MACF
-	error = mac_mount_check_fsctl(ctx, vnode_mount(vp), uap->cmd);
+	error = mac_mount_check_fsctl_v80(ctx, vnode_mount(vp), uap->cmd);
 	if (error) {
 		goto done;
 	}
@@ -11378,7 +11424,7 @@ ffsctl(proc_t p, struct ffsctl_args *uap, __unused int32_t *retval)
 	}
 
 #if CONFIG_MACF
-	if ((error = mac_mount_check_fsctl(ctx, vnode_mount(vp), uap->cmd))) {
+	if ((error = mac_mount_check_fsctl_v80(ctx, vnode_mount(vp), uap->cmd))) {
 		file_drop(fd);
 		vnode_put(vp);
 		return error;

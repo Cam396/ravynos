@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -142,6 +147,10 @@
 
 #include <bank/bank_internal.h>
 
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+extern void ravyn_kernel_pauth_init(void);
+#endif
+
 #if ALTERNATE_DEBUGGER
 #include <arm64/alternate_debugger.h>
 #endif
@@ -152,6 +161,7 @@
 
 #if CONFIG_MACF
 #include <security/mac_mach_internal.h>
+extern void ravyn_rootless_compat_init(void);
 #if CONFIG_VNGUARD
 extern void vnguard_policy_init(void);
 #endif
@@ -614,8 +624,13 @@ kernel_bootstrap_thread(void)
 	vm_commpage_init();
 	vm_commpage_text_init();
 
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+	ravyn_kernel_pauth_init();
+#endif
+
 #if CONFIG_MACF
 	mac_policy_initmach();
+	ravyn_rootless_compat_init();
 #if CONFIG_VNGUARD
 	vnguard_policy_init();
 #endif

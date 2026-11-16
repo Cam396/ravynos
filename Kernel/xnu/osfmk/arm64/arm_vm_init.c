@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <mach_debug.h>
 #include <mach_kdp.h>
@@ -1553,7 +1558,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	size_t l1_entries = 1 + ((bytes_mapped + ARM_TT_L1_SIZE - 1) / ARM_TT_L1_SIZE);
 	/* 1 L1 each for V=P and KVA, plus 1 page for each L2 */
 	size_t pages_used = 2 * (l1_entries + 1);
-	if (pages_used > BOOTSTRAP_TABLE_SIZE) {
+	if (pages_used > BOOTSTRAP_TABLE_SIZE / ARM_PGBYTES) {
 		panic("BOOTSTRAP_TABLE_SIZE too small for memory config\n");
 	}
 #endif

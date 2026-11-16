@@ -70,6 +70,7 @@ EXPORT_FILES = \
 	simple_lock.h \
 	startup.h \
 	task.h \
+	task_ident.h \
 	telemetry.h \
 	thread.h \
 	thread_call.h \

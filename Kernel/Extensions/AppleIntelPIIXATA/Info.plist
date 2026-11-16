@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- NOTICE: Modified for ravynOS macOS bring-up (2026-10-18 to 2026-11-15) under APSL-2.0 clause 2.2(b). -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
@@ -167,6 +168,23 @@
 			<string>AppleIntelPIIXATARoot</string>
 			<key>IOPCIPrimaryMatch</key>
 			<string>0x70108086</string>
+			<key>IOProbeScore</key>
+			<integer>2000</integer>
+			<key>IOProviderClass</key>
+			<string>IOPCIDevice</string>
+			<key>Supported Transfer Modes</key>
+			<string>0x00061d</string>
+		</dict>
+		<key>PIIX4 ATA Controller</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>com.apple.driver.AppleIntelPIIXATA</string>
+			<key>Controller Name</key>
+			<string>PIIX4</string>
+			<key>IOClass</key>
+			<string>AppleIntelPIIXATARoot</string>
+			<key>IOPCIPrimaryMatch</key>
+			<string>0x71118086</string>
 			<key>IOProbeScore</key>
 			<integer>2000</integer>
 			<key>IOProviderClass</key>

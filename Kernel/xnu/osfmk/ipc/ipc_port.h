@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -145,6 +150,10 @@ struct ipc_port {
 	} kdata2;
 
 	mach_vm_address_t ip_context;
+	mach_vm_address_t ip_service_port_guard;
+	mach_port_name_t ip_service_port_name;
+	boolean_t ip_service_port;
+	boolean_t ip_service_port_pdnotification;
 
 	natural_t ip_sprequests:1,      /* send-possible requests outstanding */
 	    ip_spimportant:1,           /* ... at least one is importance donating */
@@ -177,6 +186,9 @@ struct ipc_port {
 	uint8_t         ip_srp_lost_link:1,     /* special reply port turnstile link chain broken */
 	    ip_srp_msg_sent:1;                  /* special reply port msg sent */
 #endif
+	/* Appended private Sandbox label state; preserve the legacy port-field offsets above. */
+	void            *ip_splabel;
+	boolean_t       ip_tg_block_tracking; /* Render-server classification without thread-group callouts */
 };
 
 
@@ -298,6 +310,8 @@ MACRO_END
  * sends by critical system threads (which may be needed to free memory and
  * therefore cannot be blocked waiting for memory themselves).
  */
+#define IP_BIT_FILTER_MSG       0x00001000      /* port has an attached Sandbox label */
+#define ip_enforce_msg_filtering(port) (((port)->ip_object.io_bits & IP_BIT_FILTER_MSG) != 0)
 #define IP_BIT_PREALLOC         0x00008000      /* preallocated mesg */
 #define IP_PREALLOC(port)       ((port)->ip_object.io_bits & IP_BIT_PREALLOC)
 
@@ -483,6 +497,8 @@ __options_decl(ipc_port_init_flags_t, uint32_t, {
 	IPC_PORT_INIT_MAKE_SEND_RIGHT = 0x00000001,
 	IPC_PORT_INIT_MESSAGE_QUEUE   = 0x00000002,
 	IPC_PORT_INIT_SPECIAL_REPLY   = 0x00000004,
+	IPC_PORT_INIT_FILTER_MESSAGE  = 0x00000008,
+	IPC_PORT_INIT_TG_BLOCK_TRACKING = 0x00000010,
 });
 
 /* Initialize a newly-allocated port */

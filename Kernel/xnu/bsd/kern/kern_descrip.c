@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995, 1997 Apple Computer, Inc. All Rights Reserved */
 /*
  * Copyright (c) 1982, 1986, 1989, 1991, 1993
@@ -2110,6 +2115,61 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 
 		break;
 	}
+	case F_GETSIGSINFO: {
+		struct cs_blob *blob = NULL;
+		fgetsigsinfo_t sigsinfo = {};
+
+		if (fp->f_type != DTYPE_VNODE) {
+			error = EBADF;
+			goto out;
+		}
+		vp = (struct vnode *)fp->f_data;
+		proc_fdunlock(p);
+
+		error = vnode_getwithref(vp);
+		if (error) {
+			goto outdrop;
+		}
+
+		error = copyin(argp, &sigsinfo, sizeof(sigsinfo));
+		if (error) {
+			vnode_put(vp);
+			goto outdrop;
+		}
+
+		if (sigsinfo.fg_file_start == -1) {
+			/* Darwin20 defines -1 as any attached slice. The older
+			 * ubc_cs_blob_get cannot combine ANY CPU with no offset. */
+			vnode_lock_spin(vp);
+			blob = UBCINFOEXISTS(vp) ? vp->v_ubcinfo->cs_blobs : NULL;
+			vnode_unlock(vp);
+		} else {
+			blob = ubc_cs_blob_get(vp, CPU_TYPE_ANY, sigsinfo.fg_file_start);
+		}
+		if (blob == NULL) {
+			error = ENOENT;
+			vnode_put(vp);
+			goto outdrop;
+		}
+		switch (sigsinfo.fg_info_request) {
+		case GETSIGSINFO_PLATFORM_BINARY:
+			sigsinfo.fg_sig_is_platform = blob->csb_platform_binary;
+			error = copyout(&sigsinfo.fg_sig_is_platform,
+			    (vm_address_t)argp + offsetof(struct fgetsigsinfo, fg_sig_is_platform),
+			    sizeof(sigsinfo.fg_sig_is_platform));
+			if (error) {
+				vnode_put(vp);
+				goto outdrop;
+			}
+			break;
+		default:
+			error = EINVAL;
+			vnode_put(vp);
+			goto outdrop;
+		}
+		vnode_put(vp);
+		break;
+	}
 #if CONFIG_PROTECT
 	case F_GETPROTECTIONCLASS: {
 		if (fp->f_type != DTYPE_VNODE) {
@@ -4054,6 +4114,26 @@ fp_getfpipe(proc_t p, int fd, struct fileproc **resultfp,
  *		expected to have taken and held the proc_fdlock; if it is
  *		zero, than this routine internally takes and drops this lock.
  */
+int
+fp_get_pipe_id(proc_t p, int fd, uint64_t *result_pipe_id)
+{
+	struct fileproc *fp = NULL;
+	if (p == PROC_NULL || result_pipe_id == NULL) return EINVAL;
+	proc_fdlock(p);
+	int error = fp_lookup(p, fd, &fp, 1);
+	if (error == 0) {
+		struct fileglob *fg = fp->f_fglob;
+		if (FILEGLOB_DTYPE(fg) == DTYPE_PIPE) {
+			*result_pipe_id = pipe_id((struct pipe *)fg->fg_data);
+		} else {
+			error = ENOTSUP;
+		}
+		fp_drop(p, fd, fp, 1);
+	}
+	proc_fdunlock(p);
+	return error;
+}
+
 int
 fp_lookup(proc_t p, int fd, struct fileproc **resultfp, int locked)
 {

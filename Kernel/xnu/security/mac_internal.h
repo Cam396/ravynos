@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*-
  * Copyright (c) 1999, 2000, 2001, 2002 Robert N. M. Watson
@@ -77,6 +82,7 @@
 #include <security/mac.h>
 #include <security/mac_framework.h>
 #include <security/mac_policy.h>
+#include <security/mac_policy_v80.h>
 #include <security/mac_data.h>
 #include <sys/sysctl.h>
 #include <kern/locks.h>
@@ -89,6 +95,21 @@
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/vnode.h>
+
+/*
+ * mpc_list is framework-owned and unused by the legacy implementation.
+ * Versioned policies retain their original ops pointer; this private shadow
+ * supplies only admitted legacy ABI callbacks. The policy-list busy/exclusive
+ * lifetime also protects the shadow, including direct label/syscall dispatch.
+ */
+static inline const struct mac_policy_ops *
+mac_policy_ops_for_legacy(const struct mac_policy_conf *mpc)
+{
+    if (mpc->mpc_runtime_flags & MPC_RUNTIME_FLAG_RAVYN_OPS_V80) {
+        return mpc->mpc_list->mpc_ops;
+    }
+    return mpc->mpc_ops;
+}
 
 /*
  * MAC Framework sysctl namespace.
@@ -254,6 +275,95 @@ struct label *mac_mbuf_to_label(struct mbuf *m);
  * request.  Note that it returns its value via 'error' in the scope
  * of the caller.
  */
+
+/* Preserve MAC_CHECK list lifetime and error precedence, but never cast a
+ * changed callback to the other ABI. Missing/unrepresentable arguments deny
+ * only when that policy has the corresponding hook. */
+#define MAC_CHECK_ABI_ONE(check, oldargs, newargs, oldvalid, newvalid) do { \
+    if (mpc->mpc_runtime_flags & MPC_RUNTIME_FLAG_RAVYN_OPS_V80) { \
+        const struct mac_policy_ops_v80 *v80 = \
+            (const struct mac_policy_ops_v80 *)(const void *)mpc->mpc_ops; \
+        if (v80->mpo_ ## check != NULL) \
+            error = mac_error_select((newvalid) ? \
+                v80->mpo_ ## check newargs : EINVAL, error); \
+    } else if (mpc->mpc_ops->mpo_ ## check != NULL) { \
+        error = mac_error_select((oldvalid) ? \
+            mpc->mpc_ops->mpo_ ## check oldargs : EINVAL, error); \
+    } \
+} while (0)
+
+#define MAC_CHECK_ABI(check, oldargs, newargs, oldvalid, newvalid) do { \
+    struct mac_policy_conf *mpc; \
+    u_int i; \
+    error = 0; \
+    for (i = 0; i < mac_policy_list.staticmax; i++) { \
+        mpc = mac_policy_list.entries[i].mpc; \
+        if (mpc != NULL) \
+            MAC_CHECK_ABI_ONE(check, oldargs, newargs, oldvalid, newvalid); \
+    } \
+    if (mac_policy_list_conditional_busy() != 0) { \
+        for (; i <= mac_policy_list.maxindex; i++) { \
+            mpc = mac_policy_list.entries[i].mpc; \
+            if (mpc != NULL) \
+                MAC_CHECK_ABI_ONE(check, oldargs, newargs, oldvalid, newvalid); \
+        } \
+        mac_policy_list_unbusy(); \
+    } \
+} while (0)
+
+
+/* Modern-only operations have no matching legacy table cell. */
+#define MAC_CHECK_V80_ONE(check, args) do { \
+    if (mpc->mpc_runtime_flags & MPC_RUNTIME_FLAG_RAVYN_OPS_V80) { \
+        const struct mac_policy_ops_v80 *v80 = \
+            (const struct mac_policy_ops_v80 *)(const void *)mpc->mpc_ops; \
+        if (v80->mpo_ ## check != NULL) \
+            error = mac_error_select(v80->mpo_ ## check args, error); \
+    } \
+} while (0)
+
+#define MAC_CHECK_V80(check, args) do { \
+    struct mac_policy_conf *mpc; \
+    u_int i; \
+    error = 0; \
+    for (i = 0; i < mac_policy_list.staticmax; i++) { \
+        mpc = mac_policy_list.entries[i].mpc; \
+        if (mpc != NULL) MAC_CHECK_V80_ONE(check, args); \
+    } \
+    if (mac_policy_list_conditional_busy() != 0) { \
+        for (; i <= mac_policy_list.maxindex; i++) { \
+            mpc = mac_policy_list.entries[i].mpc; \
+            if (mpc != NULL) MAC_CHECK_V80_ONE(check, args); \
+        } \
+        mac_policy_list_unbusy(); \
+    } \
+} while (0)
+
+
+#define MAC_PERFORM_V80_ONE(operation, args) do { \
+    if (mpc->mpc_runtime_flags & MPC_RUNTIME_FLAG_RAVYN_OPS_V80) { \
+        const struct mac_policy_ops_v80 *v80 = \
+            (const struct mac_policy_ops_v80 *)(const void *)mpc->mpc_ops; \
+        if (v80->mpo_ ## operation != NULL) v80->mpo_ ## operation args; \
+    } \
+} while (0)
+
+#define MAC_PERFORM_V80(operation, args) do { \
+    struct mac_policy_conf *mpc; \
+    u_int i; \
+    for (i = 0; i < mac_policy_list.staticmax; i++) { \
+        mpc = mac_policy_list.entries[i].mpc; \
+        if (mpc != NULL) MAC_PERFORM_V80_ONE(operation, args); \
+    } \
+    if (mac_policy_list_conditional_busy() != 0) { \
+        for (; i <= mac_policy_list.maxindex; i++) { \
+            mpc = mac_policy_list.entries[i].mpc; \
+            if (mpc != NULL) MAC_PERFORM_V80_ONE(operation, args); \
+        } \
+        mac_policy_list_unbusy(); \
+    } \
+} while (0)
+
 #define MAC_CHECK(check, args...) do {                                  \
 	struct mac_policy_conf *mpc;                                    \
 	u_int i;                                                        \
@@ -264,9 +374,9 @@ struct label *mac_mbuf_to_label(struct mbuf *m);
 	        if (mpc == NULL)                                        \
 	                continue;                                       \
                                                                         \
-	        if (mpc->mpc_ops->mpo_ ## check != NULL)                \
+	        if (mac_policy_ops_for_legacy(mpc)->mpo_ ## check != NULL)                \
 	                error = mac_error_select(                       \
-	                    mpc->mpc_ops->mpo_ ## check (args),         \
+	                    mac_policy_ops_for_legacy(mpc)->mpo_ ## check (args),         \
 	                    error);                                     \
 	}                                                               \
 	if (mac_policy_list_conditional_busy() != 0) {                  \
@@ -275,9 +385,9 @@ struct label *mac_mbuf_to_label(struct mbuf *m);
 	                if (mpc == NULL)                                \
 	                        continue;                               \
                                                                         \
-	                if (mpc->mpc_ops->mpo_ ## check != NULL)        \
+	                if (mac_policy_ops_for_legacy(mpc)->mpo_ ## check != NULL)        \
 	                        error = mac_error_select(               \
-	                            mpc->mpc_ops->mpo_ ## check (args), \
+	                            mac_policy_ops_for_legacy(mpc)->mpo_ ## check (args), \
 	                            error);                             \
 	        }                                                       \
 	        mac_policy_list_unbusy();                               \
@@ -301,8 +411,8 @@ struct label *mac_mbuf_to_label(struct mbuf *m);
 	        if (mpc == NULL)                                        \
 	                continue;                                       \
                                                                         \
-	        if (mpc->mpc_ops->mpo_ ## check != NULL) {              \
-	                if (mpc->mpc_ops->mpo_ ## check (args) == 0)    \
+	        if (mac_policy_ops_for_legacy(mpc)->mpo_ ## check != NULL) {              \
+	                if (mac_policy_ops_for_legacy(mpc)->mpo_ ## check (args) == 0)    \
 	                        error = 0;                              \
 	        }                                                       \
 	}                                                               \
@@ -312,8 +422,8 @@ struct label *mac_mbuf_to_label(struct mbuf *m);
 	                if (mpc == NULL)                                \
 	                        continue;                               \
                                                                         \
-	                if (mpc->mpc_ops->mpo_ ## check != NULL) {      \
-	                        if (mpc->mpc_ops->mpo_ ## check (args)  \
+	                if (mac_policy_ops_for_legacy(mpc)->mpo_ ## check != NULL) {      \
+	                        if (mac_policy_ops_for_legacy(mpc)->mpo_ ## check (args)  \
 	                            == 0)                               \
 	                                error = 0;                      \
 	                }                                               \
@@ -339,9 +449,9 @@ struct label *mac_mbuf_to_label(struct mbuf *m);
 	        if (mpc == NULL)                                        \
 	                continue;                                       \
                                                                         \
-	        if (mpc->mpc_ops->mpo_ ## operation != NULL)            \
+	        if (mac_policy_ops_for_legacy(mpc)->mpo_ ## operation != NULL)            \
 	                result = result composition                     \
-	                    mpc->mpc_ops->mpo_ ## operation             \
+	                    mac_policy_ops_for_legacy(mpc)->mpo_ ## operation             \
 	                    (args);                                     \
 	}                                                               \
 	if (mac_policy_list_conditional_busy() != 0) {                  \
@@ -350,9 +460,9 @@ struct label *mac_mbuf_to_label(struct mbuf *m);
 	                if (mpc == NULL)                                \
 	                        continue;                               \
                                                                         \
-	                if (mpc->mpc_ops->mpo_ ## operation != NULL)    \
+	                if (mac_policy_ops_for_legacy(mpc)->mpo_ ## operation != NULL)    \
 	                        result = result composition             \
-	                            mpc->mpc_ops->mpo_ ## operation     \
+	                            mac_policy_ops_for_legacy(mpc)->mpo_ ## operation     \
 	                            (args);                             \
 	        }                                                       \
 	        mac_policy_list_unbusy();                               \
@@ -381,8 +491,8 @@ struct label *mac_mbuf_to_label(struct mbuf *m);
 	        if (mpc == NULL)                                        \
 	                continue;                                       \
                                                                         \
-	        if (mpc->mpc_ops->mpo_ ## operation != NULL)            \
-	                mpc->mpc_ops->mpo_ ## operation (args);         \
+	        if (mac_policy_ops_for_legacy(mpc)->mpo_ ## operation != NULL)            \
+	                mac_policy_ops_for_legacy(mpc)->mpo_ ## operation (args);         \
 	}                                                               \
 	if (mac_policy_list_conditional_busy() != 0) {                  \
 	        for (; i <= mac_policy_list.maxindex; i++) {            \
@@ -390,8 +500,8 @@ struct label *mac_mbuf_to_label(struct mbuf *m);
 	                if (mpc == NULL)                                \
 	                        continue;                               \
                                                                         \
-	                if (mpc->mpc_ops->mpo_ ## operation != NULL)    \
-	                        mpc->mpc_ops->mpo_ ## operation (args); \
+	                if (mac_policy_ops_for_legacy(mpc)->mpo_ ## operation != NULL)    \
+	                        mac_policy_ops_for_legacy(mpc)->mpo_ ## operation (args); \
 	        }                                                       \
 	        mac_policy_list_unbusy();                               \
 	}                                                               \

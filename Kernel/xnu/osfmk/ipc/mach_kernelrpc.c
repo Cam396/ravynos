@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
  /* 
   *  Modified Nov 2025 for ravynOS 
@@ -41,6 +46,9 @@
 #include <kern/ipc_tt.h>
 #include <kern/kalloc.h>
 #include <vm/vm_protos.h>
+#include <kdp/kdp_dyld.h>
+
+extern lck_mtx_t g_dyldinfo_mtx;
 
 int
 _kernelrpc_mach_vm_allocate_trap(struct _kernelrpc_mach_vm_allocate_trap_args *args)
@@ -699,5 +707,138 @@ mach_voucher_extract_attr_recipe_trap(struct mach_voucher_extract_attr_recipe_ar
 
 done:
 	ipc_voucher_release(voucher);
+	return kr;
+}
+
+
+/*
+ * Big Sur Mach trap -13: return active dyld process-info notification ports.
+ */
+kern_return_t
+task_dyld_process_info_notify_get_trap(
+	struct task_dyld_process_info_notify_get_trap_args *args)
+{
+	struct task_dyld_info dyld_info;
+	mach_msg_type_number_t info_count = TASK_DYLD_INFO_COUNT;
+	mach_port_name_t copyout_names[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+	ipc_port_t copyout_ports[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+	ipc_port_t release_ports[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+	uint32_t copyout_count = 0, release_count = 0, active_count = 0;
+	mach_vm_address_t ports_addr;
+	mach_port_name_t new_name;
+	natural_t user_names_count = 0;
+	ipc_port_t sright;
+	kern_return_t kr;
+	ipc_port_t *portp;
+	ipc_entry_t entry;
+
+	if ((mach_port_name_array_t)args->names_addr == NULL ||
+	    (natural_t *)args->names_count_addr == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	kr = copyin((vm_map_address_t)args->names_count_addr,
+	    &user_names_count, sizeof(natural_t));
+	if (kr) {
+		return KERN_MEMORY_FAILURE;
+	}
+	if (user_names_count == 0) {
+		return KERN_NO_SPACE;
+	}
+	kr = task_info(current_task(), TASK_DYLD_INFO,
+	    (task_info_t)&dyld_info, &info_count);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+	if (dyld_info.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_32) {
+		ports_addr = (mach_vm_address_t)(dyld_info.all_image_info_addr +
+		    offsetof(struct user32_dyld_all_image_infos, notifyMachPorts));
+	} else if (dyld_info.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_64) {
+		ports_addr = (mach_vm_address_t)(dyld_info.all_image_info_addr +
+		    offsetof(struct user64_dyld_all_image_infos, notifyMachPorts));
+	} else {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	lck_mtx_lock(&g_dyldinfo_mtx);
+	itk_lock(current_task());
+	if (current_task()->itk_dyld_notify == NULL) {
+		itk_unlock(current_task());
+		(void)copyoutmap_atomic32(current_task()->map, MACH_PORT_NULL,
+		    (vm_map_address_t)ports_addr);
+		lck_mtx_unlock(&g_dyldinfo_mtx);
+		kr = copyout(&copyout_count, (vm_map_address_t)args->names_count_addr,
+		    sizeof(natural_t));
+		return kr ? KERN_MEMORY_ERROR : KERN_SUCCESS;
+	}
+	for (int slot = 0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; slot++) {
+		portp = &current_task()->itk_dyld_notify[slot];
+		if (*portp == IPC_PORT_NULL) {
+			continue;
+		}
+		sright = ipc_port_copy_send(*portp);
+		if (IP_VALID(sright)) {
+			copyout_ports[active_count++] = sright;
+		} else {
+			release_ports[release_count++] = *portp;
+			*portp = IPC_PORT_NULL;
+		}
+	}
+	task_dyld_process_info_update_helper(current_task(), active_count,
+	    (vm_map_address_t)ports_addr, release_ports, release_count);
+
+	for (int i = 0; i < active_count; i++) {
+		sright = copyout_ports[i];
+		copyout_ports[i] = IPC_PORT_NULL;
+		assert(IP_VALID(sright));
+		ip_reference(sright);
+		new_name = ipc_port_copyout_send(sright, current_space());
+		if (MACH_PORT_VALID(new_name)) {
+			copyout_names[copyout_count] = new_name;
+			copyout_ports[copyout_count] = sright;
+			copyout_count++;
+		} else {
+			ip_release(sright);
+		}
+	}
+	assert(copyout_count <= active_count);
+	if (user_names_count < copyout_count) {
+		kr = KERN_NO_SPACE;
+		goto copyout_failed;
+	}
+	kr = copyout(copyout_names, (vm_map_address_t)args->names_addr,
+	    copyout_count * sizeof(mach_port_name_t));
+	if (kr) {
+		kr = KERN_MEMORY_ERROR;
+		goto copyout_failed;
+	}
+	kr = copyout(&copyout_count, (vm_map_address_t)args->names_count_addr,
+	    sizeof(natural_t));
+	if (kr) {
+		kr = KERN_MEMORY_ERROR;
+		goto copyout_failed;
+	}
+	for (int i = 0; i < copyout_count; i++) {
+		sright = copyout_ports[i];
+		assert(IP_VALID(sright));
+		ip_release(sright);
+	}
+	return KERN_SUCCESS;
+
+copyout_failed:
+	for (int i = 0; i < copyout_count; i++) {
+		sright = copyout_ports[i];
+		assert(IP_VALID(sright));
+		if (ipc_right_lookup_write(current_space(), copyout_names[i], &entry)) {
+			ip_release(sright);
+			continue;
+		}
+		if (entry->ie_object == ip_to_object(sright) ||
+		    IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_DEAD_NAME) {
+			(void)ipc_right_dealloc(current_space(), copyout_names[i], entry);
+		} else {
+			is_write_unlock(current_space());
+		}
+		ip_release(sright);
+	}
 	return kr;
 }

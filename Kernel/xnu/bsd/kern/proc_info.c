@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*
  * sysctl system call.
@@ -109,6 +114,8 @@ uint64_t get_dispatchqueue_serialno_offset_from_proc(void *);
 uint64_t get_dispatchqueue_label_offset_from_proc(void *p);
 uint64_t get_return_to_kernel_offset_from_proc(void *p);
 int proc_info_internal(int callnum, int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
+static int proc_info_internal_extended(int callnum, int pid, uint32_t flags, uint64_t ext_id, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+static int proc_pidinfo_extended(int pid, uint32_t flags, uint64_t ext_id, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
 
 /*
  * TODO: Replace the noinline attribute below.  Currently, it serves
@@ -262,14 +269,32 @@ proc_info(__unused struct proc *p, struct proc_info_args * uap, int32_t *retval)
 
 
 int
-proc_info_internal(int callnum, int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t  buffersize, int32_t * retval)
+proc_info_extended_id(__unused struct proc *p, struct proc_info_extended_id_args *uap, int32_t *retval)
+{
+	if ((uap->flags & (PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID)) ==
+	    (PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID)) {
+		return EINVAL;
+	}
+	return proc_info_internal_extended(uap->callnum, uap->pid, uap->flags,
+	           uap->ext_id, uap->flavor, uap->arg, uap->buffer, uap->buffersize, retval);
+}
+
+int
+proc_info_internal(int callnum, int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval)
+{
+	return proc_info_internal_extended(callnum, pid, 0, 0, flavor, arg, buffer, buffersize, retval);
+}
+
+static int
+proc_info_internal_extended(int callnum, int pid, uint32_t flags, uint64_t ext_id,
+    int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval)
 {
 	switch (callnum) {
 	case PROC_INFO_CALL_LISTPIDS:
 		/* pid contains type and flavor contains typeinfo */
 		return proc_listpids(pid, flavor, buffer, buffersize, retval);
 	case PROC_INFO_CALL_PIDINFO:
-		return proc_pidinfo(pid, flavor, arg, buffer, buffersize, retval);
+		return proc_pidinfo_extended(pid, flags, ext_id, flavor, arg, buffer, buffersize, retval);
 	case PROC_INFO_CALL_PIDFDINFO:
 		return proc_pidfdinfo(pid, flavor, (int)arg, buffer, buffersize, retval);
 	case PROC_INFO_CALL_KERNMSGBUF:
@@ -448,6 +473,38 @@ proc_loop:
 
 
 /********************************** proc_pidfdlist routines ********************************/
+
+/* Kernel-buffer variant. Count is capacity/result in records, not bytes.
+ * A size query is only a snapshot; callers add margin for concurrent opens. */
+int
+proc_fdlist(proc_t p, struct proc_fdinfo *buf, size_t *count)
+{
+	if (p == PROC_NULL || count == NULL) return EINVAL;
+	proc_fdlock(p);
+	struct filedesc *fdp = p->p_fd;
+	size_t written = 0;
+	if (buf == NULL) {
+		/* Darwin19's lastfile is inclusive and remains zero when empty. */
+		for (int fd = fdp->fd_lastfile; fd >= 0; fd--) {
+			if (fdp->fd_ofiles[fd] || (fdp->fd_ofileflags[fd] & UF_RESERVED)) {
+				written = (size_t)fd + 1;
+				break;
+			}
+		}
+	} else {
+		for (int fd = 0; fd < fdp->fd_nfiles && written < *count; fd++) {
+			struct fileproc *fp = fdp->fd_ofiles[fd];
+			if (fp == NULL || (fdp->fd_ofileflags[fd] & UF_RESERVED)) continue;
+			file_type_t type = FILEGLOB_DTYPE(fp->f_fglob);
+			buf[written].proc_fd = fd;
+			buf[written].proc_fdtype = type != DTYPE_ATALK ? type : PROX_FDTYPE_ATALK;
+			written++;
+		}
+	}
+	proc_fdunlock(p);
+	*count = written;
+	return 0;
+}
 
 int
 proc_pidfdlist(proc_t p, user_addr_t buffer, uint32_t  buffersize, int32_t *retval)
@@ -1379,6 +1436,7 @@ proc_piduniqidentifierinfo(proc_t p, struct proc_uniqidentifierinfo *p_uniqidinf
 	p_uniqidinfo->p_uniqueid = proc_uniqueid(p);
 	proc_getexecutableuuid(p, (unsigned char *)&p_uniqidinfo->p_uuid, sizeof(p_uniqidinfo->p_uuid));
 	p_uniqidinfo->p_puniqueid = proc_puniqueid(p);
+	p_uniqidinfo->p_idversion = proc_pidversion(p);
 	p_uniqidinfo->p_reserve2 = 0;
 	p_uniqidinfo->p_reserve3 = 0;
 	p_uniqidinfo->p_reserve4 = 0;
@@ -1841,7 +1899,14 @@ out:
 
 
 int
-proc_pidinfo(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t  buffersize, int32_t * retval)
+proc_pidinfo(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval)
+{
+	return proc_pidinfo_extended(pid, 0, 0, flavor, arg, buffer, buffersize, retval);
+}
+
+static int
+proc_pidinfo_extended(int pid, uint32_t flags, uint64_t ext_id, int flavor,
+    uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval)
 {
 	struct proc * p = PROC_NULL;
 	int error = ENOTSUP;
@@ -2007,6 +2072,16 @@ proc_pidinfo(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t  bu
 		zombie = 1;
 	} else {
 		gotref = 1;
+	}
+
+	/* Check identity while holding the same proc reference used by the query. */
+	if ((flags & PIF_COMPARE_IDVERSION) && ext_id != (uint64_t)proc_pidversion(p)) {
+		error = ESRCH;
+		goto out;
+	}
+	if ((flags & PIF_COMPARE_UNIQUEID) && ext_id != proc_uniqueid(p)) {
+		error = ESRCH;
+		goto out;
 	}
 
 	/* Certain operations don't require privileges */

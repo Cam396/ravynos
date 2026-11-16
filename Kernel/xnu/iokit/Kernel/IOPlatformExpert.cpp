@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <IOKit/IOCPU.h>
 #include <IOKit/IODeviceTreeSupport.h>
@@ -98,6 +103,7 @@ OSMetaClassDefineReservedUnused(IOPlatformExpert, 10);
 OSMetaClassDefineReservedUnused(IOPlatformExpert, 11);
 
 static IOPlatformExpert * gIOPlatform;
+static void IOPublishPlatformUUID(IOPlatformExpert *platform);
 static OSDictionary * gIOInterruptControllers;
 static IOLock * gIOInterruptControllersLock;
 static IODTNVRAM *gIOOptionsEntry;
@@ -187,7 +193,10 @@ IOPlatformExpert::start( IOService * provider )
 	PE_parse_boot_argn("enforce_quiesce_safety", &gEnforceQuiesceSafety,
 	    sizeof(gEnforceQuiesceSafety));
 
-	return configure(provider);
+	if (!configure(provider)) return false;
+	// Stable machine identity is available independently of NVRAM registration.
+	IOPublishPlatformUUID(this);
+	return true;
 }
 
 bool
@@ -1308,8 +1317,8 @@ PEGetCoprocessorVersion( void )
 }
 } /* extern "C" */
 
-void
-IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
+static void
+IOPublishPlatformUUID(IOPlatformExpert *platform)
 {
 	OSData *          data;
 	IORegistryEntry * entry;
@@ -1395,6 +1404,18 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
 	}
 #endif /* defined(XNU_TARGET_OS_OSX) */
 
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+	// The VM loader supplies a stable UUID independently of the NVRAM store.
+	if (string == NULL) {
+		data = OSDynamicCast(OSData,
+		    platform->getProvider()->getProperty("ravyn,platform-uuid"));
+		if (data && data->getLength() == sizeof(uuid_t)) {
+			uuid_unparse((const uint8_t *)data->getBytesNoCopy(), uuid);
+			string = OSString::withCString(uuid);
+		}
+	}
+#endif
+
 	if (string == NULL) {
 		entry = IORegistryEntry::fromPath( "/options", gIODTPlane );
 		if (entry) {
@@ -1409,12 +1430,18 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
 	}
 
 	if (string) {
-		getProvider()->setProperty( kIOPlatformUUIDKey, string );
-		publishResource( kIOPlatformUUIDKey, string );
+		platform->getProvider()->setProperty( kIOPlatformUUIDKey, string );
+		IOService::publishResource( kIOPlatformUUIDKey, string );
 
 		string->release();
 	}
 
+}
+
+void
+IOPlatformExpert::registerNVRAMController(IONVRAMController *caller)
+{
+	IOPublishPlatformUUID(this);
 	publishResource("IONVRAM");
 }
 
@@ -1996,3 +2023,51 @@ IOPanicPlatform::start(IOService * provider)
 
 	return false;
 }
+
+
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+/* Open Darwin platform support: enumerate the actual supplied device tree.
+ * Controller, storage and CPU drivers match the published nubs separately.
+ * This class does not advertise hardware that lacks an implementation.
+ */
+class RavynBCMPlatform : public IODTPlatformExpert {
+    OSDeclareDefaultStructors(RavynBCMPlatform);
+public:
+    const char *deleteList(void) APPLE_KEXT_OVERRIDE { return "()"; }
+    const char *excludeList(void) APPLE_KEXT_OVERRIDE {
+        return "('chosen', 'memory', 'cpus', 'defaults')";
+    }
+    bool configure(IOService *provider) APPLE_KEXT_OVERRIDE;
+    bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+};
+OSDefineMetaClassAndStructors(RavynBCMPlatform, IODTPlatformExpert);
+
+bool RavynBCMPlatform::configure(IOService *provider)
+{
+    IORegistryEntry *cpus = provider->childFromPath("cpus", gIODTPlane);
+    IORegistryEntry *soc = provider->childFromPath("arm-io", gIODTPlane);
+    bool valid = cpus && soc;
+    OSSafeReleaseNULL(cpus);
+    OSSafeReleaseNULL(soc);
+    if (!valid) {
+        kprintf("RavynBCMPlatform: missing cpus or arm-io device tree node\n");
+        return false;
+    }
+    if (!IODTPlatformExpert::configure(provider)) return false;
+    kprintf("RavynBCMPlatform: published CPU and SoC device-tree nubs\n");
+    return true;
+}
+
+bool RavynBCMPlatform::start(IOService *provider)
+{
+    if (!IODTPlatformExpert::start(provider)) return false;
+    setProperty("RavynPlatformSupport", "early-device-tree; no storage/graphics claim");
+    kprintf("RavynBCMPlatform: attached to %s\n", provider->getName());
+    registerService();
+    unsigned int count = ml_get_cpu_count();
+    if (!count) panic("RavynBCMPlatform: no discovered CPUs");
+    kprintf("RavynBCMPlatform: finalized %u discovered/capped CPUs\n", count);
+    ml_init_max_cpus(count);
+    return true;
+}
+#endif

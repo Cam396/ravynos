@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /*-
  * Copyright (c) 1999-2002 Robert N. M. Watson
  * Copyright (c) 2001 Ilmar S. Habibulin
@@ -608,8 +613,13 @@ mac_socket_check_deliver(__unused struct socket *so, __unused struct mbuf *mbuf)
 #endif
 
 int
-mac_socket_check_ioctl(kauth_cred_t cred, struct socket *so,
-    unsigned int cmd)
+mac_socket_check_ioctl(struct ucred *cred, struct socket *so, unsigned int cmd)
+{
+	return mac_socket_check_ioctl_v80(cred, so, cmd);
+}
+
+int
+mac_socket_check_ioctl_v80(struct ucred *cred, struct socket *so, unsigned long cmd)
 {
 	int error;
 
@@ -620,8 +630,9 @@ mac_socket_check_ioctl(kauth_cred_t cred, struct socket *so,
 	}
 #endif
 
-	MAC_CHECK(socket_check_ioctl, cred,
-	    (socket_t)so, cmd, so->so_label);
+	MAC_CHECK_ABI(socket_check_ioctl,
+	    (cred, (socket_t)so, (unsigned int)cmd, so->so_label),
+	    (cred, (socket_t)so, cmd, so->so_label), cmd <= (unsigned int)-1, 1);
 	return error;
 }
 

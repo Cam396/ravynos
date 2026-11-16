@@ -20,6 +20,11 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
  
 #include "AppleFileSystemDriver.h"
 
@@ -275,12 +280,14 @@ AppleFileSystemDriver::mediaNotificationHandler(
         
         // only IOMedia's with content hints are interesting
         contentHint = OSDynamicCast( OSString, media->getProperty(kIOMediaContentHintKey) );
-        if (contentHint == NULL)  break;
-        contentStr = contentHint->getCStringNoCopy();
-        if (contentStr == NULL)  break;
+        // Whole raw HFS media has no partition-scheme content hint. Probe its
+        // real volume header instead of depending on a fabricated partition.
+        contentStr = contentHint ? contentHint->getCStringNoCopy() : "";
+        if (contentStr == NULL) contentStr = "";
         
         // probe based on content hint
-        if ( strcmp(contentStr, "Apple_HFS" ) == 0 ||
+        if ( (!contentStr[0] && media->isWhole()) ||
+             strcmp(contentStr, "Apple_HFS" ) == 0 ||
              strcmp(contentStr, "Apple_HFSX" ) == 0 ||
              strcmp(contentStr, "Apple_Boot" ) == 0 ||
              strcmp(contentStr, "Apple_Recovery" ) == 0 ||

@@ -26,6 +26,8 @@ public:
     virtual uint32_t getDepth() ;
 
     virtual IOReturn enableController() APPLE_KEXT_OVERRIDE;
+    virtual IOReturn getAttributeForConnection(IOIndex connectIndex,
+        IOSelect attribute, uintptr_t *value) APPLE_KEXT_OVERRIDE;
 
     virtual const char * getPixelFormats() APPLE_KEXT_OVERRIDE;
     virtual IOReturn getCurrentDisplayMode(IODisplayModeID * displayMode,

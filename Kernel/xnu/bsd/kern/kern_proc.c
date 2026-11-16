@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
 /*
  * Copyright (c) 1982, 1986, 1989, 1991, 1993
@@ -80,6 +85,7 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/proc_internal.h>
+#include <security/mac_mach_internal.h>
 #include <sys/acct.h>
 #include <sys/wait.h>
 #include <sys/file_internal.h>
@@ -95,6 +101,7 @@
 #include <sys/sysproto.h>
 #include <sys/kauth.h>
 #include <sys/codesign.h>
+#include <libkern/ravyn_amfi.h>
 #include <sys/kernel_types.h>
 #include <sys/ubc.h>
 #include <kern/kalloc.h>
@@ -378,6 +385,38 @@ proc_isinferior(int pid1, int pid2)
 	}
 
 	return retval;
+}
+
+/* Monterey process identities: callers snapshot current/referenced processes. */
+struct proc_ident
+proc_ident(proc_t p)
+{
+	struct proc_ident ident = {
+		.p_pid = proc_pid(p),
+		.p_uniqueid = proc_uniqueid(p),
+		.p_idversion = proc_pidversion(p),
+	};
+
+	return ident;
+}
+
+proc_t
+proc_find_ident(struct proc_ident const *ident)
+{
+	proc_t proc = PROC_NULL;
+
+	proc = proc_find(ident->p_pid);
+	if (proc == PROC_NULL) {
+		return PROC_NULL;
+	}
+
+	if (proc_uniqueid(proc) != ident->p_uniqueid ||
+	    proc_pidversion(proc) != ident->p_idversion) {
+		proc_rele(proc);
+		return PROC_NULL;
+	}
+
+	return proc;
 }
 
 proc_t
@@ -825,6 +864,15 @@ proc_original_ppid(proc_t p)
 }
 
 int
+proc_starttime(proc_t p, struct timeval *tv)
+{
+	if (p == PROC_NULL || tv == NULL) return EINVAL;
+	tv->tv_sec = p->p_start.tv_sec;
+	tv->tv_usec = p->p_start.tv_usec;
+	return 0;
+}
+
+int
 proc_selfpid(void)
 {
 	return current_proc()->p_pid;
@@ -939,6 +987,12 @@ proc_parent_is_currentproc(proc_t p)
 
 	proc_list_unlock();
 	return ret;
+}
+
+bool
+proc_allow_low_space_writes(proc_t p)
+{
+	return (p->p_vfs_iopolicy & P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES) != 0;
 }
 
 void
@@ -1187,6 +1241,15 @@ proc_is64bit_data(proc_t p)
 {
 	assert(p->task);
 	return (int)task_get_64bit_data(p->task);
+}
+
+int
+proc_isinitproc(proc_t p)
+{
+	if (initproc == NULL) {
+		return 0;
+	}
+	return p == initproc;
 }
 
 int
@@ -2092,6 +2155,12 @@ out:
 	pidlist_free(pl);
 }
 
+boolean_t
+proc_is_translated(proc_t p __unused)
+{
+	return 0;
+}
+
 int
 proc_is_classic(proc_t p __unused)
 {
@@ -2264,6 +2333,7 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 	case CS_OPS_CDHASH:
 	case CS_OPS_PIDOFFSET:
 	case CS_OPS_ENTITLEMENTS_BLOB:
+	case CS_OPS_DER_ENTITLEMENTS_BLOB:
 	case CS_OPS_IDENTITY:
 	case CS_OPS_BLOB:
 	case CS_OPS_TEAMID:
@@ -2426,6 +2496,18 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 			break;
 		}
 
+        if (ravyn_amfi_registered()) {
+            struct cs_blob *blob = csproc_get_blob(pt);
+            CS_GenericBlob *xml = NULL;
+            proc_unlock(pt);
+            if (blob == NULL) { error = EBADEXEC; break; }
+            if (ravyn_amfi_entitlements_xml(csblob_os_entitlements_get(blob), &xml)) {
+                length = ntohl(xml->length);
+                error = csops_copy_token(xml, length, usize, uaddr);
+                kfree(xml, length);
+            }
+            break;
+        }
 		error = cs_entitlements_blob_get(pt, &start, &length);
 		proc_unlock(pt);
 		if (error) {
@@ -2433,6 +2515,38 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		}
 
 		error = csops_copy_token(start, length, usize, uaddr);
+		break;
+	}
+	case CS_OPS_DER_ENTITLEMENTS_BLOB: {
+		void *start;
+		size_t length;
+		struct cs_blob *blob;
+
+		/* Keep the existing audit-token, MAC and process-validity checks. */
+		proc_lock(pt);
+		if ((pt->p_csflags & (CS_VALID | CS_DEBUGGED)) == 0) {
+			proc_unlock(pt);
+			error = EINVAL;
+			break;
+		}
+		blob = csproc_get_blob(pt);
+		proc_unlock(pt);
+		if (blob == NULL) {
+			error = EBADEXEC;
+			break;
+		}
+		error = csblob_get_der_entitlements(blob, &start, &length);
+        /* A malformed signed DER slot never falls back to a converted blob. */
+        if (error == 0 && start == NULL) {
+            const CS_GenericBlob *converted = NULL;
+            if (ravyn_amfi_entitlements_der(csblob_os_entitlements_get(blob), &converted)) {
+                start = (void *)converted;
+                length = ntohl(converted->length);
+            }
+        }
+		if (error == 0) {
+			error = csops_copy_token(start, length, usize, uaddr);
+		}
 		break;
 	}
 	case CS_OPS_MARKRESTRICT:
@@ -3836,31 +3950,89 @@ proc_send_synchronous_EXC_RESOURCE(proc_t p)
 size_t
 proc_get_syscall_filter_mask_size(int which)
 {
-	if (which == SYSCALL_MASK_UNIX) {
-		return nsysent;
-	}
-
-	return 0;
+    switch (which) {
+    case SYSCALL_MASK_UNIX: return nsysent;
+#if CONFIG_MACF
+    case SYSCALL_MASK_MACH: return mach_trap_count;
+    case SYSCALL_MASK_KOBJ: return mach_kobj_count;
+#endif
+    default: return 0;
+    }
 }
 
 int
 proc_set_syscall_filter_mask(proc_t p, int which, unsigned char *maskptr, size_t masklen)
 {
+    if (p == PROC_NULL) return EINVAL;
 #if DEVELOPMENT || DEBUG
-	if (syscallfilter_disable) {
-		printf("proc_set_syscall_filter_mask: attempt to set policy for pid %d, but disabled by boot-arg\n", proc_pid(p));
-		return KERN_SUCCESS;
-	}
-#endif // DEVELOPMENT || DEBUG
+    if (syscallfilter_disable) return KERN_SUCCESS;
+#endif
+    size_t entries = proc_get_syscall_filter_mask_size(which);
+    if (entries == 0 || (maskptr != NULL && masklen != entries)) return EINVAL;
+    switch (which) {
+    case SYSCALL_MASK_UNIX:
+        p->syscall_filter_mask = maskptr;
+        return KERN_SUCCESS;
+#if CONFIG_MACF
+    case SYSCALL_MASK_MACH:
+        if (p->task == TASK_NULL) return EINVAL;
+        mac_task_set_mach_filter_mask(p->task, maskptr);
+        return KERN_SUCCESS;
+    case SYSCALL_MASK_KOBJ:
+        if (p->task == TASK_NULL) return EINVAL;
+        mac_task_set_kobj_filter_mask(p->task, maskptr);
+        return KERN_SUCCESS;
+#endif
+    default: return EINVAL;
+    }
+}
 
-	if (which != SYSCALL_MASK_UNIX ||
-	    (maskptr != NULL && masklen != nsysent)) {
-		return EINVAL;
-	}
+int
+proc_set_syscall_filter_callbacks(syscall_filter_cbs_t cbs)
+{
+    if (cbs == NULL || cbs->version != SYSCALL_FILTER_CALLBACK_VERSION) return EINVAL;
+    /* The pinned donor has NULL here. A new UNIX callback needs its own path;
+     * legacy UNIX MAC enforcement continues through its existing hook. */
+    if (cbs->unix_filter_cbfunc != NULL) return ENOTSUP;
+#if CONFIG_MACF
+    if (mac_task_register_filter_callbacks(cbs->mach_filter_cbfunc,
+        cbs->kobj_filter_cbfunc) != KERN_SUCCESS) return EPERM;
+    return 0;
+#else
+    return ENOTSUP;
+#endif
+}
 
-	p->syscall_filter_mask = maskptr;
+int
+proc_set_syscall_filter_index(int which, int number, int index)
+{
+#if CONFIG_MACF
+    if (which != SYSCALL_MASK_KOBJ || index < 0 || index >= mach_kobj_count) return EINVAL;
+    return ipc_kobject_set_kobjidx(number, index) == KERN_SUCCESS ? 0 : ENOENT;
+#else
+    (void)which; (void)number; (void)index;
+    return ENOTSUP;
+#endif
+}
 
-	return KERN_SUCCESS;
+int
+proc_set_filter_message_flag(proc_t p, boolean_t flag)
+{
+    if (p == PROC_NULL) {
+        return EINVAL;
+    }
+    task_set_filter_msg_flag(proc_task(p), flag);
+    return 0;
+}
+
+int
+proc_get_filter_message_flag(proc_t p, boolean_t *flag)
+{
+    if (p == PROC_NULL || flag == NULL) {
+        return EINVAL;
+    }
+    *flag = task_get_filter_msg_flag(proc_task(p));
+    return 0;
 }
 
 bool

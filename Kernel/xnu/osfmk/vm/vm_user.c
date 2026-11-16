@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -1182,6 +1187,71 @@ vm_map_kernel(
 	    cur_protection, max_protection, inheritance);
 	*address = CAST_DOWN(vm_offset_t, map_addr);
 	return kr;
+}
+
+/*
+ * Big Sur mach_vm_remap_new ABI. It consumes the source task send right
+ * only after a successful remap.
+ */
+kern_return_t
+mach_vm_remap_new_external(
+        vm_map_t                target_map,
+        mach_vm_offset_t        *address,
+        mach_vm_size_t          size,
+        mach_vm_offset_t        mask,
+        int                     flags,
+        mach_port_t             src_tport,
+        mach_vm_offset_t        memory_address,
+        boolean_t               copy,
+        vm_prot_t               *cur_protection,
+        vm_prot_t               *max_protection,
+        vm_inherit_t            inheritance)
+{
+        vm_tag_t tag;
+        vm_map_offset_t map_addr;
+        kern_return_t kr;
+        vm_map_t src_map;
+
+        flags |= VM_FLAGS_RETURN_DATA_ADDR;
+        VM_GET_FLAGS_ALIAS(flags, tag);
+
+        if (flags & ~VM_FLAGS_USER_REMAP) {
+                return KERN_INVALID_ARGUMENT;
+        }
+        if (target_map == VM_MAP_NULL) {
+                return KERN_INVALID_ARGUMENT;
+        }
+        if ((*cur_protection & ~VM_PROT_ALL) ||
+            (*max_protection & ~VM_PROT_ALL) ||
+            (*cur_protection & *max_protection) != *cur_protection) {
+                return KERN_INVALID_ARGUMENT;
+        }
+        if ((*max_protection & (VM_PROT_WRITE | VM_PROT_EXECUTE)) ==
+            (VM_PROT_WRITE | VM_PROT_EXECUTE)) {
+                return KERN_PROTECTION_FAILURE;
+        }
+
+        if (copy || *max_protection == VM_PROT_READ ||
+            *max_protection == VM_PROT_NONE) {
+                src_map = convert_port_to_map_read(src_tport);
+        } else {
+                src_map = convert_port_to_map(src_tport);
+        }
+        if (src_map == VM_MAP_NULL) {
+                return KERN_INVALID_ARGUMENT;
+        }
+
+        map_addr = (vm_map_offset_t)*address;
+        kr = vm_map_remap(target_map, &map_addr, size, mask, flags,
+            VM_MAP_KERNEL_FLAGS_NONE, tag, src_map, memory_address, copy,
+            cur_protection, max_protection, inheritance);
+        *address = map_addr;
+        vm_map_deallocate(src_map);
+
+        if (kr == KERN_SUCCESS) {
+                ipc_port_release_send(src_tport);
+        }
+        return kr;
 }
 
 /*
@@ -4532,3 +4602,44 @@ vm_map(
 }
 
 #endif /* __x86_64__ */
+
+kern_return_t
+mach_memory_entry_phys_page_offset(
+	ipc_port_t              entry_port,
+	vm_object_offset_t      *offset_p)
+{
+	vm_named_entry_t        mem_entry;
+	vm_object_t             object;
+	vm_object_offset_t      offset;
+	vm_object_offset_t      data_offset;
+
+	if (!offset_p || !IP_VALID(entry_port) ||
+        ip_kotype(entry_port) != IKOT_NAMED_ENTRY) return KERN_INVALID_ARGUMENT;
+    mem_entry = (vm_named_entry_t)ip_get_kobject(entry_port);
+	if (mem_entry == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	named_entry_lock(mem_entry);
+
+	if (mem_entry->is_sub_map ||
+	    mem_entry->is_copy) {
+		named_entry_unlock(mem_entry);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	/* Darwin 19 selects backing.object by excluding submaps and copies above. */
+	object = mem_entry->backing.object;
+	if (object == VM_OBJECT_NULL) {
+		named_entry_unlock(mem_entry);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	offset = mem_entry->offset;
+	data_offset = mem_entry->data_offset;
+
+	named_entry_unlock(mem_entry);
+
+	*offset_p = offset - trunc_page_64(offset) + data_offset;
+	return KERN_SUCCESS;
+}

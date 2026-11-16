@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #ifndef _ARM_PMAP_H_
 #define _ARM_PMAP_H_    1
 
@@ -138,7 +143,13 @@ typedef struct pmap_cpu_data pmap_cpu_data_t;
 
 #if defined(__arm64__)
 
+/* An 8 GiB / 4 KiB target needs more than the original 2 GiB allowance:
+ * two roots plus two L2 tables per GiB, with room for the physmap slide. */
+#if defined(ARM64_BOARD_CONFIG_BCM2837)
+#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 32)
+#else
 #define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 8)
+#endif
 
 typedef uint64_t        tt_entry_t;                                     /* translation table entry type */
 #define TT_ENTRY_NULL    ((tt_entry_t *) 0)

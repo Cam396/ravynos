@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 /*
@@ -90,6 +95,7 @@
 #include <ipc/ipc_importance.h>
 #include <security/mac_mach_internal.h>
 
+extern struct proc *initproc;
 /*
  *	Routine:	ipc_right_lookup_write
  *	Purpose:
@@ -2737,6 +2743,20 @@ ipc_right_copyout(
 			port->ip_context = current_thread()->ith_msg_addr;
 			*context = port->ip_context;
 			*guard_flags = *guard_flags & ~MACH_MSG_GUARD_FLAGS_UNGUARDED_ON_SEND;
+		}
+		if (port->ip_service_port && port->ip_service_port_pdnotification) {
+			port->ip_service_port_pdnotification = FALSE;
+			if (current_task()->bsd_info == initproc) {
+				if (name != port->ip_service_port_name) {
+					panic("service port name 0x%x does not match launchd name 0x%x",
+					    name, port->ip_service_port_name);
+				}
+				if (port->ip_service_port_guard != 0) {
+					port->ip_guarded = 1;
+					port->ip_strict_guard = 1;
+					port->ip_context = port->ip_service_port_guard;
+				}
+			}
 		}
 
 		assert((bits & MACH_PORT_TYPE_RECEIVE) == 0);

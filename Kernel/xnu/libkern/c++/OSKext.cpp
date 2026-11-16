@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 extern "C" {
 #include <string.h>
@@ -49,6 +54,7 @@ extern "C" {
 #include <sys/sysctl.h>
 #include <uuid/uuid.h>
 #include <sys/random.h>
+#include <pexpert/pexpert.h>
 
 #include <sys/pgo.h>
 
@@ -66,6 +72,7 @@ extern "C" {
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IORegistryEntry.h>
 #include <IOKit/IOService.h>
+#include <IOKit/IOUserClient.h>
 
 #include <IOKit/IOStatisticsPrivate.h>
 #include <IOKit/IOBSD.h>
@@ -3981,8 +3988,13 @@ OSKext::updateExcludeList(OSDictionary *infoDict)
 	IORecursiveLockLock(sKextLock);
 
 	if (newVersion > sExcludeListVersion) {
+		OSDictionary * newExcludeList = OSDictionary::withDictionary(myTempDict, 0);
+		if (!newExcludeList) {
+			IORecursiveLockUnlock(sKextLock);
+			return false;
+		}
 		OSSafeReleaseNULL(sExcludeListByID);
-		sExcludeListByID = OSDictionary::withDictionary(myTempDict, 0);
+		sExcludeListByID = newExcludeList;
 		sExcludeListVersion = newVersion;
 		updated = true;
 	}
@@ -8130,6 +8142,284 @@ finish:
 #if PRAGMA_MARK
 #pragma mark User-Space Requests
 #endif
+
+/* copyClientEntitlement returns a retained object, not necessarily a Boolean. */
+static bool
+_OSKextHasTrueEntitlement(const char * entitlement)
+{
+	OSObject * value = IOUserClient::copyClientEntitlement(current_task(), entitlement);
+	bool entitled = value == kOSBooleanTrue;
+	OSSafeReleaseNULL(value);
+	return entitled;
+}
+
+/*
+ * This constructor deliberately accepts only legacy, automatically matched,
+ * genuinely codeless KEXTs. It neither creates a prelinked executable nor
+ * registers DEXTs while the DriverKit shared-region path is unavailable.
+ * All callers hold sKextLock. New methods are nonvirtual: no object/vtable ABI
+ * changes are needed for this opt-in compatibility path.
+ */
+OSKext *
+OSKext::withLegacyCodelessInfo(OSDictionary * anInfoDict)
+{
+	OSKext * newKext = new OSKext;
+	if (newKext && !newKext->initWithLegacyCodelessInfo(anInfoDict)) {
+		newKext->release();
+		return NULL;
+	}
+	return newKext;
+}
+
+bool
+OSKext::initWithLegacyCodelessInfo(OSDictionary * anInfoDict)
+{
+	OSString * bundlePath = NULL;
+	OSString * packageType = NULL;
+	OSDictionary * personalities = NULL;
+	OSCollectionIterator * iterator = NULL;
+	OSString * personalityName = NULL;
+	bool valid = false;
+
+	if (!anInfoDict || !super::init()) {
+		return false;
+	}
+	bundlePath = OSDynamicCast(OSString, anInfoDict->getObject("_CodelessKextBundlePath"));
+	if (!bundlePath || bundlePath->getLength() < 6 ||
+	    bundlePath->getCStringNoCopy()[0] != '/' ||
+	    strcmp(bundlePath->getCStringNoCopy() + bundlePath->getLength() - 5, ".kext")) {
+		return false;
+	}
+	/* Own the collections rather than retaining the IPC request's dictionaries. */
+	OSDictionary * copiedInfo = OSDynamicCast(OSDictionary, anInfoDict->copyCollection());
+	if (!copiedInfo) {
+		return false;
+	}
+	valid = setInfoDictionaryAndPath(copiedInfo, bundlePath);
+	copiedInfo->release();
+	if (!valid) {
+		return false;
+	}
+	if (!getIdentifierCString() || !getIdentifierCString()[0]) {
+		return false;
+	}
+	packageType = OSDynamicCast(OSString, getPropertyForHostArch(kCFBundlePackageTypeKey));
+	if (!packageType || !packageType->isEqualTo("KEXT") || isDriverKit() ||
+	    declaresExecutable() || isKernelComponent() ||
+	    getPropertyForHostArch("CFBundleUEXTExecutable") ||
+	    getPropertyForHostArch("OSBundleRequireExplicitLoad") == kOSBooleanTrue) {
+		return false;
+	}
+	OSObject * rawPersonalities = getPropertyForHostArch(kIOKitPersonalitiesKey);
+	personalities = OSDynamicCast(OSDictionary, rawPersonalities);
+	if (rawPersonalities && !personalities) {
+		return false;
+	}
+	if (personalities) {
+		iterator = OSCollectionIterator::withCollection(personalities);
+		if (!iterator) {
+			return false;
+		}
+		while ((personalityName = OSDynamicCast(OSString, iterator->getNextObject()))) {
+			OSDictionary * personality = OSDynamicCast(OSDictionary,
+			    personalities->getObject(personalityName));
+			if (!personality || personality->getObject("IOUserClass") ||
+			    personality->getObject("IOUserServerName")) {
+				iterator->release();
+				return false;
+			}
+		}
+		iterator->release();
+	}
+	if (!strcmp(getIdentifierCString(), "com.apple.driver.KextExcludeList")) {
+		if (!OSDynamicCast(OSDictionary, infoDict->getObject("OSKextExcludeList")) ||
+		    (version > sExcludeListVersion && !updateExcludeList(infoDict))) {
+			return false;
+		}
+	}
+	infoDict->removeObject("_CodelessKextBundlePath");
+	return registerIdentifier();
+}
+
+/*
+ * Called under sKextLock. An attempted handoff is sticky for this boot, including
+ * fatal failures after registration starts: retrying different records could
+ * replace a partially registered set. Such failures keep readiness pending and
+ * require a fresh boot after fixing the allocation/publication failure.
+ */
+OSReturn
+OSKext::handleLegacyDaemonStartup(OSDictionary * requestDict)
+{
+	/* Monterey error values from xnu-8020.140.41 OSKextLib.h. */
+	const OSReturn systemKCFailure = libkern_kext_err(0x1d);
+	const OSReturn auxKCFailure = libkern_kext_err(0x1e);
+	static bool attempted = false;
+	static OSReturn attemptedResult = kOSKextReturnUnsupported;
+	OSDictionary * args = OSDynamicCast(OSDictionary,
+	    requestDict->getObject(kKextRequestArgumentsKey));
+	OSArray * records = args ? OSDynamicCast(OSArray,
+	    args->getObject("Codeless Personalities")) : NULL;
+	OSObject * pageable = args ? args->getObject("PageableKCName") : NULL;
+	OSObject * auxiliary = args ? args->getObject("AuxKCName") : NULL;
+	OSObject * dkArg = args ? args->getObject("Enable DriverKit Shared Region") : NULL;
+	OSNumber * enableDriverKit = OSDynamicCast(OSNumber, dkArg);
+	unsigned int accepted = 0, deferred = 0;
+
+	if (!args || !records || records->getCount() > 256 ||
+	    (pageable && !OSDynamicCast(OSString, pageable)) ||
+	    (auxiliary && !OSDynamicCast(OSString, auxiliary)) ||
+	    (dkArg && (!enableDriverKit || enableDriverKit->unsigned64BitValue() > 1))) {
+		return kOSKextReturnInvalidArgument;
+	}
+	if (!sLoadEnabled) {
+		return kOSKextReturnDisabled;
+	}
+	if (attempted) {
+		return attemptedResult;
+	}
+	/* Validate the array before allowing any registration or startup completion. */
+	for (unsigned int i = 0; i < records->getCount(); i++) {
+		if (!OSDynamicCast(OSDictionary, records->getObject(i))) {
+			return kOSKextReturnInvalidArgument;
+		}
+	}
+	attempted = true;
+	attemptedResult = kOSReturnSuccess;
+	if (pageable) {
+		attemptedResult = systemKCFailure;
+		printf("RAVYN-KEXT-LEGACY unsupported SystemKC=%s\n",
+		    ((OSString *)pageable)->getCStringNoCopy());
+	}
+	if (auxiliary) {
+		attemptedResult = attemptedResult == kOSReturnSuccess ? auxKCFailure :
+		    attemptedResult | auxKCFailure;
+		printf("RAVYN-KEXT-LEGACY unsupported AuxKC=%s\n",
+		    ((OSString *)auxiliary)->getCStringNoCopy());
+	}
+	if (enableDriverKit && enableDriverKit->unsigned64BitValue() == 1) {
+		printf("RAVYN-KEXT-LEGACY DriverKit shared region unsupported; remains disabled\n");
+		if (attemptedResult == kOSReturnSuccess) {
+			attemptedResult = kOSKextReturnUnsupported;
+		}
+	}
+	for (unsigned int i = 0; i < records->getCount(); i++) {
+		OSDictionary * record = OSDynamicCast(OSDictionary, records->getObject(i));
+		OSString * bundle = OSDynamicCast(OSString, record->getObject(kCFBundleIdentifierKey));
+		OSString * package = OSDynamicCast(OSString, record->getObject(kCFBundlePackageTypeKey));
+		OSString * recordPath = OSDynamicCast(OSString, record->getObject("_CodelessKextBundlePath"));
+		/* Refuse DEXTs before even constructing an OSKext. */
+		if ((package && package->isEqualTo("DEXT")) ||
+		    record->getObject("CFBundleUEXTExecutable") ||
+		    (recordPath && recordPath->getLength() >= 5 &&
+		    !strcmp(recordPath->getCStringNoCopy() + recordPath->getLength() - 5, ".dext"))) {
+			printf("RAVYN-KEXT-LEGACY deferred DEXT bundle=%s\n",
+			    bundle ? bundle->getCStringNoCopy() : "(missing)");
+			deferred++;
+			continue;
+		}
+		OSKext * kext = withLegacyCodelessInfo(record);
+		if (!kext) {
+			printf("RAVYN-KEXT-LEGACY deferred unsupported legacy record bundle=%s\n",
+			    bundle ? bundle->getCStringNoCopy() : "(missing)");
+			deferred++;
+			continue;
+		}
+		printf("RAVYN-KEXT-LEGACY registered codeless bundle=%s\n", kext->getIdentifierCString());
+		accepted++;
+		kext->release();
+	}
+	if (deferred && attemptedResult == kOSReturnSuccess) {
+		attemptedResult = kOSKextReturnUnsupported;
+	}
+	OSArray * personalities = copyAllKextPersonalities(true);
+	if (!personalities) {
+		printf("RAVYN-KEXT-LEGACY personality allocation failed; startup pending, reboot required\n");
+		attemptedResult = kOSKextReturnNoMemory;
+		return attemptedResult;
+	}
+	/* Also exclude any DriverKit records already supplied by the booter. */
+	for (unsigned int i = 0; i < personalities->getCount();) {
+		OSDictionary * personality = OSDynamicCast(OSDictionary, personalities->getObject(i));
+		OSString * publisher = personality ? OSDynamicCast(OSString,
+		    personality->getObject(kIOPersonalityPublisherKey)) : NULL;
+		if (!publisher && personality) {
+			publisher = OSDynamicCast(OSString, personality->getObject(kCFBundleIdentifierKey));
+		}
+		OSKext * owner = publisher ? OSDynamicCast(OSKext, sKextsByID->getObject(publisher)) : NULL;
+		if (!personality || personality->getObject("IOUserClass") ||
+		    personality->getObject("IOUserServerName") ||
+		    (owner && (owner->isDriverKit() ||
+		    owner->getPropertyForHostArch("OSBundleRequireExplicitLoad") == kOSBooleanTrue))) {
+			personalities->removeObject(i);
+		} else {
+			i++;
+		}
+	}
+	bool published = gIOCatalogue->addDrivers(personalities, true);
+	unsigned int count = personalities->getCount();
+	personalities->release();
+	if (!published) {
+		printf("RAVYN-KEXT-LEGACY catalogue publication failed; startup pending, reboot required\n");
+		attemptedResult = kOSKextReturnInternalError;
+		return attemptedResult;
+	}
+	/* Pure VFS modules have no IOKit personalities to trigger their start.
+	 * Monterey's collection loader cannot activate them through this legacy
+	 * kernel. Start only executable, prelinked filesystem modules already
+	 * admitted by the boot cache. Do not accept new code or explicit-load
+	 * modules from the daemon's codeless records.
+	 */
+	OSDictionary * filesystemKexts = copyKexts();
+	OSCollectionIterator * filesystemIterator = filesystemKexts ?
+	    OSCollectionIterator::withCollection(filesystemKexts) : NULL;
+	if (!filesystemIterator) {
+		OSSafeReleaseNULL(filesystemKexts);
+		attemptedResult = kOSKextReturnNoMemory;
+		return attemptedResult;
+	}
+	OSString * filesystemID = NULL;
+	OSReturn filesystemResult = kOSReturnSuccess;
+	const char filesystemPrefix[] = "com.apple.filesystems.";
+	while ((filesystemID = OSDynamicCast(OSString,
+	    filesystemIterator->getNextObject()))) {
+		const char * identifier = filesystemID->getCStringNoCopy();
+		if (!identifier || strncmp(identifier, filesystemPrefix,
+		    sizeof(filesystemPrefix) - 1)) {
+			continue;
+		}
+		OSKext * filesystem = OSDynamicCast(OSKext,
+		    filesystemKexts->getObject(filesystemID));
+		if (!filesystem || !filesystem->isPrelinked() ||
+		    !filesystem->declaresExecutable() || filesystem->isDriverKit() ||
+		    filesystem->getPropertyForHostArch("OSBundleRequireExplicitLoad") == kOSBooleanTrue) {
+			continue;
+		}
+		OSObject * raw = filesystem->getPropertyForHostArch(kIOKitPersonalitiesKey);
+		OSDictionary * personalities = OSDynamicCast(OSDictionary, raw);
+		if (raw && (!personalities || personalities->getCount())) {
+			continue;
+		}
+		filesystemResult = loadKextWithIdentifier(identifier, /* allowDefer */ false);
+		printf("RAVYN-KEXT-LEGACY filesystem start bundle=%s result=%d\n",
+		    identifier, filesystemResult);
+		if (filesystemResult != kOSReturnSuccess) {
+			break;
+		}
+	}
+	filesystemIterator->release();
+	filesystemKexts->release();
+	if (filesystemResult != kOSReturnSuccess) {
+		attemptedResult = filesystemResult;
+		return attemptedResult;
+	}
+	setKextdActive();
+	setDeferredLoadSucceeded(true);
+	IOService::kextdLaunched();
+	printf("RAVYN-KEXT-LEGACY startup completed legacy-only accepted=%u deferred=%u personalities=%u result=%d\n",
+	    accepted, deferred, count, attemptedResult);
+	return attemptedResult;
+}
+
 /*********************************************************************
 * XXX - this function is a big ugly mess
 *********************************************************************/
@@ -8160,6 +8450,9 @@ OSKext::handleRequest(
 	OSSerialize  * serializer         = NULL;// must release
 
 	OSArray      * logInfoArray       = NULL;// must release
+
+	static unsigned int sRavynRequestTraceSequence = 0;
+	unsigned int ravynRequestTraceSequence = 0;
 
 	OSString     * predicate          = NULL;// do not release
 	OSString     * kextIdentifier     = NULL;// do not release
@@ -8227,6 +8520,89 @@ OSKext::handleRequest(
 	    "Received '%s' request from user space.",
 	    predicate->getCStringNoCopy());
 
+	/*
+	 * Bounded diagnostics for Monterey kernelmanagerd startup. The daemon is
+	 * selected only by the explicit kernelmanagerd=1 boot argument.
+	 */
+	if (predicate->isEqualTo("loadfilesetkc") ||
+	    predicate->isEqualTo("DaemonReady")) {
+		if (sRavynRequestTraceSequence < 16) {
+			ravynRequestTraceSequence = ++sRavynRequestTraceSequence;
+			OSDictionary * requestArgs = OSDynamicCast(OSDictionary,
+			    requestDict->getObject(kKextRequestArgumentsKey));
+			printf("RAVYN-KEXT-REQUEST seq=%u predicate=%s hostpriv=%u args=%s\n",
+			    ravynRequestTraceSequence, predicate->getCStringNoCopy(),
+			    (unsigned int)(hostPriv != HOST_PRIV_NULL),
+			    requestArgs ? "dictionary" : "missing-or-wrong-type");
+			if (requestArgs) {
+				OSCollectionIterator * argIterator =
+				    OSCollectionIterator::withCollection(requestArgs);
+				OSSymbol * argKey = NULL;
+				unsigned int argCount = 0;
+				while (argIterator && argCount < 16 &&
+				    (argKey = OSDynamicCast(OSSymbol, argIterator->getNextObject()))) {
+					const char * keyName = argKey->getCStringNoCopy();
+					OSObject * argValue = requestArgs->getObject(argKey);
+					OSString * stringValue = OSDynamicCast(OSString, argValue);
+					OSArray * arrayValue = OSDynamicCast(OSArray, argValue);
+					OSNumber * numberValue = OSDynamicCast(OSNumber, argValue);
+					printf("RAVYN-KEXT-ARG seq=%u key=%s type=%s",
+					    ravynRequestTraceSequence, keyName,
+					    argValue ? argValue->getMetaClass()->getClassName() : "null");
+					if (arrayValue) {
+						printf(" count=%u", arrayValue->getCount());
+					} else if (numberValue &&
+					    !strcmp(keyName, "Enable DriverKit Shared Region")) {
+						printf(" value=%llu",
+						    (unsigned long long)numberValue->unsigned64BitValue());
+					} else if (stringValue &&
+					    (!strcmp(keyName, "PageableKCName") ||
+					     !strcmp(keyName, "AuxKCName"))) {
+						printf(" value=%s", stringValue->getCStringNoCopy());
+					}
+					printf("\n");
+					if (arrayValue && !strcmp(keyName, "Codeless Personalities")) {
+						unsigned int itemCount = arrayValue->getCount();
+						for (unsigned int i = 0; i < itemCount; i++) {
+							OSDictionary * personality = OSDynamicCast(OSDictionary,
+							    arrayValue->getObject(i));
+							if (personality) {
+								OSString * bundleID = OSDynamicCast(OSString,
+								    personality->getObject("CFBundleIdentifier"));
+								OSString * bundlePath = OSDynamicCast(OSString,
+								    personality->getObject("_CodelessKextBundlePath"));
+								OSString * packageType = OSDynamicCast(OSString,
+								    personality->getObject("CFBundlePackageType"));
+								OSString * executable = OSDynamicCast(OSString,
+								    personality->getObject("CFBundleExecutable"));
+								OSString * userExecutable = OSDynamicCast(OSString,
+								    personality->getObject("CFBundleUEXTExecutable"));
+								OSBoolean * explicitLoad = OSDynamicCast(OSBoolean,
+								    personality->getObject("OSBundleRequireExplicitLoad"));
+								printf("RAVYN-KEXT-CODELESS seq=%u index=%u bundle=%s path=%s package=%s executable=%s userExecutable=%s explicitLoad=%s\n",
+								    ravynRequestTraceSequence, i,
+								    bundleID ? bundleID->getCStringNoCopy() : "(missing)",
+								    bundlePath ? bundlePath->getCStringNoCopy() : "(missing)",
+								    packageType ? packageType->getCStringNoCopy() : "(missing)",
+								    executable ? executable->getCStringNoCopy() : "(missing)",
+								    userExecutable ? userExecutable->getCStringNoCopy() : "(missing)",
+								    explicitLoad == kOSBooleanTrue ? "true" :
+								    explicitLoad == kOSBooleanFalse ? "false" : "(missing)");
+							} else {
+								OSObject * item = arrayValue->getObject(i);
+								printf("RAVYN-KEXT-CODELESS seq=%u index=%u type=%s\n",
+								    ravynRequestTraceSequence, i,
+								    item ? item->getMetaClass()->getClassName() : "null");
+							}
+						}
+					}
+					argCount++;
+				}
+				OSSafeReleaseNULL(argIterator);
+			}
+		}
+	}
+
 	result = kOSKextReturnNotPrivileged;
 	if (hostPriv == HOST_PRIV_NULL) {
 		/* must be root to use these kext requests */
@@ -8257,7 +8633,22 @@ OSKext::handleRequest(
 
 	result = kOSKextReturnInvalidArgument;
 
-	if (predicate->isEqualTo(kKextRequestPredicateStart)) {
+	if (predicate->isEqualTo("DaemonReady") || predicate->isEqualTo("loadfilesetkc")) {
+		int legacyStartup = 0;
+		if (!PE_parse_boot_argn("kernelmanagerd_legacy", &legacyStartup, sizeof(legacyStartup)) ||
+		    legacyStartup != 1) {
+			result = kOSKextReturnUnsupported;
+		} else if (hostPriv == HOST_PRIV_NULL ||
+		    !_OSKextHasTrueEntitlement("com.apple.private.security.kext-collection-management") ||
+		    _OSKextHasTrueEntitlement("com.apple.private.security.only-bootkc-management")) {
+			result = kOSKextReturnNotPrivileged;
+		} else if (predicate->isEqualTo("DaemonReady")) {
+			/* This is a query, including the valid no-arguments request. */
+			result = sKextdActive ? kOSReturnSuccess : kIOReturnNotReady;
+		} else {
+			result = handleLegacyDaemonStartup(requestDict);
+		}
+	} else if (predicate->isEqualTo(kKextRequestPredicateStart)) {
 		if (!kextIdentifier) {
 			OSKextLog(/* kext */ NULL,
 			    kOSKextLogErrorLevel |
@@ -8468,6 +8859,11 @@ OSKext::handleRequest(
 	}
 
 finish:
+
+	if (ravynRequestTraceSequence != 0) {
+		printf("RAVYN-KEXT-RESULT seq=%u result=%d\n",
+		    ravynRequestTraceSequence, result);
+	}
 
 	/* Gather up the collected log messages for user space. Any messages
 	 * messages past this call will not make it up as log messages but

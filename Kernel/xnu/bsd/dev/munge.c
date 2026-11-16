@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <sys/cdefs.h>
 #include <sys/types.h>
@@ -352,6 +357,23 @@ munge_wwwwwl(void *args)
 	out_args[1] = in_args[1];
 	out_args[0] = in_args[0];
 }
+
+void
+munge_wwwwllww(void *args)
+{
+	volatile uint64_t *out_args = (volatile uint64_t*)args;
+	volatile uint32_t *in_args = (volatile uint32_t*)args;
+
+	out_args[7] = in_args[9];
+	out_args[6] = in_args[8];
+	out_args[5] = *(volatile uint64_t*)&in_args[6];
+	out_args[4] = *(volatile uint64_t*)&in_args[4];
+	out_args[3] = in_args[3];
+	out_args[2] = in_args[2];
+	out_args[1] = in_args[1];
+	out_args[0] = in_args[0];
+}
+
 
 void
 munge_wwwwwlww(void *args)

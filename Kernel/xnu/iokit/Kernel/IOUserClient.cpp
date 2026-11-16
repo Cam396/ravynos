@@ -25,12 +25,18 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 
 #include <libkern/c++/OSKext.h>
 #include <IOKit/IOKitServer.h>
 #include <IOKit/IOKitKeysPrivate.h>
 #include <IOKit/IOUserClient.h>
+#include <libkern/c++/OSSharedPtr.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IORegistryEntry.h>
 #include <IOKit/IOCatalogue.h>
@@ -50,6 +56,7 @@
 #include <sys/codesign.h>
 
 #include <mach/sdt.h>
+#include <pexpert/pexpert.h>
 #include <os/hash.h>
 
 #if CONFIG_MACF
@@ -73,6 +80,16 @@ extern "C" {
 #define ARG32(x)    ((void *)(uintptr_t)SCALAR32(x))
 #define REF64(x)    ((io_user_reference_t)((UInt64)(x)))
 #define REF32(x)    ((int)(x))
+
+static bool
+RavynFramebufferTraceEnabled(IOService * service)
+{
+	uint32_t enabled = 0;
+	return service
+	    && service->metaCast("IOFramebuffer")
+	    && PE_parse_boot_argn("ravyn_fbtrace", &enabled, sizeof(enabled))
+	    && enabled;
+}
 
 enum{
 	kIOUCAsync0Flags          = 3ULL,
@@ -1203,6 +1220,11 @@ IOServiceMessageUserNotification::copyNextObject()
 OSDefineMetaClassAndAbstractStructors( IOUserClient, IOService )
 
 IOLock       * gIOUserClientOwnersLock;
+static IOLock *gIOUCFilterCallbacksLock;
+static struct io_filter_callbacks gIOUCFilterCallbacksStorage;
+static const struct io_filter_callbacks * volatile gIOUCFilterCallbacks;
+static_assert(sizeof(struct io_filter_callbacks) == 3 * sizeof(void *),
+    "IOUserClient filter callback ABI");
 
 void
 IOUserClient::initialize( void )
@@ -1210,7 +1232,39 @@ IOUserClient::initialize( void )
 	gIOObjectPortLock       = IOLockAlloc();
 	gIOUserClientOwnersLock = IOLockAlloc();
 	gIOUserServerLock       = IOLockAlloc();
-	assert(gIOObjectPortLock && gIOUserClientOwnersLock);
+	gIOUCFilterCallbacksLock = IOLockAlloc();
+	assert(gIOObjectPortLock && gIOUserClientOwnersLock &&
+	    gIOUCFilterCallbacksLock);
+}
+
+IOReturn
+IOUserClient::registerFilterCallbacks(
+    const struct io_filter_callbacks *callbacks, size_t size)
+{
+	if (!callbacks || size < sizeof(*callbacks)) {
+		return kIOReturnBadArgument;
+	}
+	if (!gIOUCFilterCallbacksLock) {
+		return kIOReturnNotReady;
+	}
+
+	IOLockLock(gIOUCFilterCallbacksLock);
+	if (gIOUCFilterCallbacks) {
+		IOLockUnlock(gIOUCFilterCallbacksLock);
+		return kIOReturnBusy;
+	}
+
+	/* Copy the descriptor so the caller may use temporary descriptor storage. */
+	gIOUCFilterCallbacksStorage.io_filter_resolver = callbacks->io_filter_resolver;
+	gIOUCFilterCallbacksStorage.io_filter_applier = callbacks->io_filter_applier;
+	gIOUCFilterCallbacksStorage.io_filter_release = callbacks->io_filter_release;
+	if (!OSCompareAndSwapPtr(NULL, &gIOUCFilterCallbacksStorage,
+	    (void * volatile *)&gIOUCFilterCallbacks)) {
+		IOLockUnlock(gIOUCFilterCallbacksLock);
+		return kIOReturnBusy;
+	}
+	IOLockUnlock(gIOUCFilterCallbacksLock);
+	return kIOReturnSuccess;
 }
 
 void
@@ -1565,8 +1619,16 @@ bool
 IOUserClient::reserve()
 {
 	if (!reserved) {
-		reserved = IONew(ExpansionData, 1);
+		reserved = IONewZero(ExpansionData, 1);
 		if (!reserved) {
+			return false;
+		}
+	}
+	if (!reserved->filterLock) {
+		reserved->filterLock = IOLockAlloc();
+		if (!reserved->filterLock) {
+			IODelete(reserved, ExpansionData, 1);
+			reserved = NULL;
 			return false;
 		}
 	}
@@ -1752,6 +1814,197 @@ iokit_task_terminate(task_t task)
 	return KERN_SUCCESS;
 }
 
+struct IOUCFilterTaskIdentity {
+	uintptr_t taskAddress;
+	uint64_t processUniqueID;
+	int processIDVersion;
+};
+
+struct IOUCFilterPolicy {
+	IOUCFilterTaskIdentity identity;
+	io_filter_policy_t filterPolicy;
+	IOUCFilterPolicy *next;
+};
+
+static bool
+iouc_filter_task_identity(task_t task, IOUCFilterTaskIdentity *identity)
+{
+	proc_t proc;
+
+	/*
+	 * All filter entry points use the live calling task.  Sample its BSD
+	 * identity once; never retain or dereference a cached task/proc pointer.
+	 * The version distinguishes execs even when an address is reused.
+	 */
+	if (!task || task != current_task()) {
+		return false;
+	}
+	proc = (proc_t)get_bsdtask_info(task);
+	if (!proc) {
+		return false;
+	}
+	identity->taskAddress = (uintptr_t)task;
+	identity->processUniqueID = proc_uniqueid(proc);
+	identity->processIDVersion = proc_pidversion(proc);
+	return true;
+}
+
+static bool
+iouc_filter_identity_equal(const IOUCFilterTaskIdentity *a,
+    const IOUCFilterTaskIdentity *b)
+{
+	return a->taskAddress == b->taskAddress &&
+	       a->processUniqueID == b->processUniqueID &&
+	       a->processIDVersion == b->processIDVersion;
+}
+
+static io_filter_policy_t
+iouc_filter_for_identity(IOLock *lock, IOUCFilterPolicy **policies,
+    const IOUCFilterTaskIdentity *identity)
+{
+	io_filter_policy_t policy = 0;
+
+	IOLockLock(lock);
+	for (IOUCFilterPolicy *elem = *policies; elem; elem = elem->next) {
+		if (iouc_filter_identity_equal(&elem->identity, identity)) {
+			policy = elem->filterPolicy;
+			break;
+		}
+	}
+	IOLockUnlock(lock);
+	return policy;
+}
+
+io_filter_policy_t
+IOUserClient::filterForTask(task_t task)
+{
+	IOUCFilterTaskIdentity identity;
+
+	if (!reserved || !reserved->filterLock ||
+	    !iouc_filter_task_identity(task, &identity)) {
+		return 0;
+	}
+	return iouc_filter_for_identity(reserved->filterLock,
+	           &reserved->filterPolicies, &identity);
+}
+
+IOReturn
+IOUserClient::resolveFilterForTask(task_t task, uint32_t type)
+{
+	const struct io_filter_callbacks *callbacks = gIOUCFilterCallbacks;
+	IOUCFilterTaskIdentity identity, currentIdentity;
+	IOUCFilterPolicy *elem;
+	io_filter_policy_t policy = 0;
+	IOReturn ret;
+
+	/*
+	 * Some legacy clients do not call our initWithTask.  Initialize their
+	 * expansion storage even when no filter is registered, as at open in
+	 * the Monterey reference.  The existing open failure path unwinds it.
+	 */
+	if (!reserved && !reserve()) {
+		return kIOReturnNoMemory;
+	}
+	if (!callbacks || !callbacks->io_filter_resolver) {
+		return kIOReturnSuccess;
+	}
+	if (!reserved->filterLock || !iouc_filter_task_identity(task, &identity)) {
+		return kIOReturnNotReady;
+	}
+	if (iouc_filter_for_identity(reserved->filterLock,
+	    &reserved->filterPolicies, &identity)) {
+		return kIOReturnSuccess;
+	}
+
+	ret = callbacks->io_filter_resolver(task, this, type, &policy);
+	if (ret == kIOReturnUnsupported) {
+		return kIOReturnSuccess;
+	}
+	if (ret != kIOReturnSuccess || !policy) {
+		return ret;
+	}
+
+	/* Do not publish a result if the live identity changed during resolution. */
+	if (!iouc_filter_task_identity(task, &currentIdentity) ||
+	    !iouc_filter_identity_equal(&identity, &currentIdentity)) {
+		if (callbacks->io_filter_release) {
+			callbacks->io_filter_release(policy);
+		}
+		return kIOReturnNotReady;
+	}
+	elem = (IOUCFilterPolicy *)IOMalloc(sizeof(*elem));
+	if (!elem) {
+		if (callbacks->io_filter_release) {
+			callbacks->io_filter_release(policy);
+		}
+		return kIOReturnNoMemory;
+	}
+	elem->identity = identity;
+	elem->filterPolicy = policy;
+
+	IOLockLock(reserved->filterLock);
+	for (IOUCFilterPolicy *existing = reserved->filterPolicies; existing;
+	    existing = existing->next) {
+		if (iouc_filter_identity_equal(&existing->identity, &identity)) {
+			IOLockUnlock(reserved->filterLock);
+			IOFree(elem, sizeof(*elem));
+			if (callbacks->io_filter_release) {
+				callbacks->io_filter_release(policy);
+			}
+			return kIOReturnSuccess;
+		}
+	}
+	elem->next = reserved->filterPolicies;
+	reserved->filterPolicies = elem;
+	IOLockUnlock(reserved->filterLock);
+	return kIOReturnSuccess;
+}
+
+IOReturn
+IOUserClient::applyFilterForTask(task_t task, io_filter_type_t type,
+    uint32_t selector)
+{
+	const struct io_filter_callbacks *callbacks = gIOUCFilterCallbacks;
+	IOUCFilterTaskIdentity identity;
+	io_filter_policy_t policy;
+	const bool traceFramebuffer = RavynFramebufferTraceEnabled(getService());
+
+	if (traceFramebuffer) {
+		IOLog("RavynFBTrace: filter begin pid=%d client=%p type=%u selector=%u\n",
+		    proc_selfpid(), this, (unsigned)type, selector);
+	}
+	if (!callbacks || !callbacks->io_filter_applier) {
+		if (traceFramebuffer) {
+			IOLog("RavynFBTrace: filter done result=0x%08x reason=no-applier\n",
+			    kIOReturnSuccess);
+		}
+		return kIOReturnSuccess;
+	}
+	if (!reserved || !reserved->filterLock ||
+	    !iouc_filter_task_identity(task, &identity)) {
+		if (traceFramebuffer) {
+			IOLog("RavynFBTrace: filter done result=0x%08x reason=no-identity\n",
+			    kIOReturnNotReady);
+		}
+		return kIOReturnNotReady;
+	}
+	policy = iouc_filter_for_identity(reserved->filterLock,
+	    &reserved->filterPolicies, &identity);
+	if (policy) {
+		IOReturn result = callbacks->io_filter_applier(this, policy, type, selector);
+		if (traceFramebuffer) {
+			IOLog("RavynFBTrace: filter done result=0x%08x reason=applied policy=%p\n",
+			    result, policy);
+		}
+		return result;
+	}
+	if (traceFramebuffer) {
+		IOLog("RavynFBTrace: filter done result=0x%08x reason=no-policy\n",
+		    kIOReturnSuccess);
+	}
+	return kIOReturnSuccess;
+}
+
 void
 IOUserClient::free()
 {
@@ -1760,6 +2013,27 @@ IOUserClient::free()
 	}
 	if (lock) {
 		IOLockFree(lock);
+	}
+
+	if (reserved) {
+		IOUCFilterPolicy *elem;
+		IOLockLock(reserved->filterLock);
+		elem = reserved->filterPolicies;
+		reserved->filterPolicies = NULL;
+		IOLockUnlock(reserved->filterLock);
+		while (elem) {
+			IOUCFilterPolicy *next = elem->next;
+			const struct io_filter_callbacks *callbacks = gIOUCFilterCallbacks;
+			if (callbacks && callbacks->io_filter_release) {
+				callbacks->io_filter_release(elem->filterPolicy);
+			}
+			IOFree(elem, sizeof(*elem));
+			elem = next;
+		}
+		if (reserved->filterLock) {
+			IOLockFree(reserved->filterLock);
+			reserved->filterLock = NULL;
+		}
 	}
 
 	IOStatisticsUnregisterCounter();
@@ -3942,7 +4216,18 @@ is_io_service_open_extended(
 
 	CHECK( IOService, _service, service );
 
+	const bool traceFramebuffer = RavynFramebufferTraceEnabled(service);
+	if (traceFramebuffer) {
+		IOLog("RavynFBTrace: open begin pid=%d class=%s registry=%qx type=%u task=%p properties=%u endian=%u\n",
+		    proc_selfpid(), service->getMetaClass()->getClassName(),
+		    service->getRegistryEntryID(), connect_type, owningTask,
+		    propertiesCnt, ndr.int_rep);
+	}
+
 	if (!owningTask) {
+		if (traceFramebuffer) {
+			IOLog("RavynFBTrace: open reject null-task\n");
+		}
 		return kIOReturnBadArgument;
 	}
 	assert(owningTask == current_task());
@@ -3950,8 +4235,20 @@ is_io_service_open_extended(
 		return kIOReturnBadArgument;
 	}
 
+#if CONFIG_MACF
+	if (mac_iokit_check_open_service(kauth_cred_get(), service, connect_type) != 0) {
+		if (traceFramebuffer) {
+			IOLog("RavynFBTrace: open denied at service MAC\n");
+		}
+		return kIOReturnNotPermitted;
+	}
+#endif
+
 	do{
 		if (properties) {
+			if (traceFramebuffer) {
+				IOLog("RavynFBTrace: open rejected properties\n");
+			}
 			return kIOReturnUnsupported;
 		}
 #if 0
@@ -4000,6 +4297,10 @@ is_io_service_open_extended(
 
 		res = service->newUserClient( owningTask, (void *) owningTask,
 		    connect_type, propertiesDict, &client );
+		if (traceFramebuffer) {
+			IOLog("RavynFBTrace: newUserClient result=0x%08x client=%p class=%s\n",
+			    res, client, client ? client->getMetaClass()->getClassName() : "<null>");
+		}
 
 		if (propertiesDict) {
 			propertiesDict->release();
@@ -4018,18 +4319,36 @@ is_io_service_open_extended(
 			    && (kOSBooleanTrue != client->getProperty(kIOUserClientCrossEndianCompatibleKey)));
 			if (disallowAccess) {
 				res = kIOReturnUnsupported;
+				if (traceFramebuffer) {
+					IOLog("RavynFBTrace: open rejected cross-endian client\n");
+				}
 			}
 #if CONFIG_MACF
 			else if (0 != mac_iokit_check_open(kauth_cred_get(), client, connect_type)) {
 				res = kIOReturnNotPermitted;
+				if (traceFramebuffer) {
+					IOLog("RavynFBTrace: open denied at client MAC\n");
+				}
 			}
 #endif
 
 			if (kIOReturnSuccess == res) {
+				res = client->resolveFilterForTask(owningTask, connect_type);
+				if (traceFramebuffer) {
+					IOLog("RavynFBTrace: resolveFilterForTask result=0x%08x\n", res);
+				}
+			}
+			if (kIOReturnSuccess == res) {
 				res = client->registerOwner(owningTask);
+				if (traceFramebuffer) {
+					IOLog("RavynFBTrace: registerOwner result=0x%08x\n", res);
+				}
 			}
 
 			if (kIOReturnSuccess != res) {
+				if (traceFramebuffer) {
+					IOLog("RavynFBTrace: open cleanup result=0x%08x client=%p\n", res, client);
+				}
 				IOStatisticsClientCall();
 				client->clientClose();
 				client->release();
@@ -4048,6 +4367,10 @@ is_io_service_open_extended(
 	*connection = client;
 	*result = res;
 
+	if (traceFramebuffer) {
+		IOLog("RavynFBTrace: open done mach=0x%08x result=0x%08x connection=%p\n",
+		    err, res, client);
+	}
 	return err;
 }
 
@@ -4156,6 +4479,13 @@ is_io_connect_map_memory_into_task
 		return kIOReturnBadArgument;
 	}
 
+	const bool traceFramebuffer = RavynFramebufferTraceEnabled(client->getService());
+	if (traceFramebuffer) {
+		IOLog("RavynFBTrace: map begin pid=%d type=%u task=%p address=0x%llx size=0x%llx flags=0x%x\n",
+		    proc_selfpid(), memory_type, into_task,
+		    (unsigned long long)*address,
+		    size ? (unsigned long long)*size : 0ULL, flags);
+	}
 	IOStatisticsClientCall();
 	map = client->mapClientMemory64( memory_type, into_task, flags, *address );
 
@@ -4190,6 +4520,12 @@ is_io_connect_map_memory_into_task
 		err = kIOReturnBadArgument;
 	}
 
+	if (traceFramebuffer) {
+		IOLog("RavynFBTrace: map done pid=%d type=%u result=0x%08x map=%p address=0x%llx size=0x%llx\n",
+		    proc_selfpid(), memory_type, err, map,
+		    (unsigned long long)*address,
+		    size ? (unsigned long long)*size : 0ULL);
+	}
 	return err;
 }
 
@@ -4412,7 +4748,11 @@ is_io_connect_method_var_output
 	args.structureOutputDescriptorSize = 0;
 
 	IOStatisticsClientCall();
-	ret = client->externalMethod( selector, &args );
+	ret = client->applyFilterForTask(current_task(),
+	    io_filter_type_external_method, selector);
+	if (kIOReturnSuccess == ret) {
+		ret = client->externalMethod( selector, &args );
+	}
 
 	*scalar_outputCnt = args.scalarOutputCount;
 	*inband_outputCnt = args.structureOutputSize;
@@ -4518,7 +4858,11 @@ is_io_connect_method
 	args.structureOutputDescriptorSize = ool_output_size ? *ool_output_size : 0;
 
 	IOStatisticsClientCall();
-	ret = client->externalMethod( selector, &args );
+	ret = client->applyFilterForTask(current_task(),
+	    io_filter_type_external_method, selector);
+	if (kIOReturnSuccess == ret) {
+		ret = client->externalMethod( selector, &args );
+	}
 
 	*scalar_outputCnt = args.scalarOutputCount;
 	*inband_outputCnt = args.structureOutputSize;
@@ -4616,7 +4960,11 @@ is_io_connect_async_method
 	args.structureOutputDescriptorSize = *ool_output_size;
 
 	IOStatisticsClientCall();
-	ret = client->externalMethod( selector, &args );
+	ret = client->applyFilterForTask(current_task(),
+	    io_filter_type_external_async_method, selector);
+	if (kIOReturnSuccess == ret) {
+		ret = client->externalMethod( selector, &args );
+	}
 
 	*scalar_outputCnt = args.scalarOutputCount;
 	*inband_outputCnt = args.structureOutputSize;
@@ -5487,10 +5835,6 @@ shim_io_async_method_structureI_structureO(
 	return err;
 }
 
-#if !NO_KEXTD
-bool gIOKextdClearedBusy = false;
-#endif
-
 /* Routine io_catalog_send_data */
 kern_return_t
 is_io_catalog_send_data(
@@ -5624,10 +5968,7 @@ is_io_catalog_send_data(
 
 	case kIOCatalogKextdFinishedLaunching: {
 #if !NO_KEXTD
-		if (!gIOKextdClearedBusy) {
-			IOService::kextdLaunched();
-			gIOKextdClearedBusy = true;
-		}
+		IOService::kextdLaunched();
 #endif
 		kr = kIOReturnSuccess;
 	}
@@ -5813,19 +6154,20 @@ iokit_user_client_trap(struct iokit_user_client_trap_args *args)
 		}
 		OSSafeReleaseNULL(object);
 	} else if ((userClient = OSDynamicCast(IOUserClient, iokit_lookup_connect_ref_current_task((mach_port_name_t) ref)))) {
-		IOExternalTrap *trap;
+		IOExternalTrap *trap = NULL;
 		IOService *target = NULL;
 
-		trap = userClient->getTargetAndTrapForIndex(&target, args->index);
-
-		if (trap && target) {
-			IOTrap func;
-
-			func = trap->func;
-
-			if (func) {
-				result = (target->*func)(args->p1, args->p2, args->p3, args->p4, args->p5, args->p6);
-			}
+		result = userClient->applyFilterForTask(current_task(),
+		    io_filter_type_trap, args->index);
+		if (result == kIOReturnSuccess) {
+			/* Keep the legacy bad-index result when no trap is installed. */
+			result = kIOReturnBadArgument;
+			trap = userClient->getTargetAndTrapForIndex(&target, args->index);
+		}
+		if (trap && target && trap->func) {
+			IOTrap func = trap->func;
+			result = (target->*func)(args->p1, args->p2, args->p3,
+			    args->p4, args->p5, args->p6);
 		}
 
 		iokit_remove_connect_reference(userClient);
@@ -6024,3 +6366,13 @@ OSMetaClassDefineReservedUnused(IOUserClient, 12);
 OSMetaClassDefineReservedUnused(IOUserClient, 13);
 OSMetaClassDefineReservedUnused(IOUserClient, 14);
 OSMetaClassDefineReservedUnused(IOUserClient, 15);
+
+IOReturn
+IOUserClient::copyObjectForPortNameInTask(task_t task, mach_port_name_t name,
+    OSSharedPtr<OSObject>& object)
+{
+    OSObject *raw = NULL;
+    IOReturn result = copyObjectForPortNameInTask(task, name, &raw);
+    object.reset(raw, OSNoRetain); /* raw lookup transfers an existing +1 */
+    return result;
+}

@@ -25,6 +25,11 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <libkern/OSAtomic.h>
 #include <stdbool.h>
@@ -1157,12 +1162,15 @@ hfs_vnop_getattr(struct vnop_getattr_args *ap)
 	vap->va_supported |= VNODE_ATTR_va_data_size;
 #endif
 
-#if CONFIG_PROTECT
 	if (VATTR_IS_ACTIVE(vap, va_dataprotect_class)) {
-    		vap->va_dataprotect_class = cp->c_cpentry ? CP_CLASS(cp->c_cpentry->cp_pclass) : 0;
-    		VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
-    	} 	
+#if CONFIG_PROTECT
+		vap->va_dataprotect_class = cp->c_cpentry ? CP_CLASS(cp->c_cpentry->cp_pclass) : 0;
+#else
+		/* This build has no per-file content protection: class zero. */
+		vap->va_dataprotect_class = 0;
 #endif
+		VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
+	}
 	if (VATTR_IS_ACTIVE(vap, va_write_gencount)) {
 		if (ubc_is_mapped_writable(vp)) {
 			/*
@@ -1367,6 +1375,14 @@ hfs_vnop_setattr(struct vnop_setattr_args *ap)
 	uid_t nuid;
 	gid_t ngid;
 	time_t orig_ctime;
+
+#if !CONFIG_PROTECT
+	/* Reject unsupported protection before any other attributes can change. */
+	if (VATTR_IS_ACTIVE(vap, va_dataprotect_class) &&
+	    vap->va_dataprotect_class != 0) {
+		return ENOTSUP;
+	}
+#endif
 
 	orig_ctime = VTOC(vp)->c_ctime;
 	int decmpfs_reset_state = 0;
@@ -1642,11 +1658,14 @@ out:
 #endif
 	}
 
+	if (VATTR_IS_ACTIVE(vap, va_dataprotect_class)) {
 #if CONFIG_PROTECT
-	VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
-	if (!error && VATTR_IS_ACTIVE(vap, va_dataprotect_class))
-		error = cp_vnode_setclass(vp, vap->va_dataprotect_class);
+		if (!error)
+			error = cp_vnode_setclass(vp, vap->va_dataprotect_class);
 #endif
+		/* Without CONFIG_PROTECT, only the existing zero class is accepted. */
+		VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
+	}
 
 	return (error);
 }

@@ -1,8 +1,15 @@
 MK_WERROR = no
 SUBDIR =
+ACPI_COMPONENT ?= combined
+.if ${ACPI_COMPONENT} == "platform"
+KEXT = RavynACPIPlatform
+INFO_PLIST = Info-PlatformOnly.plist
+BUNDLE_IDENTIFIER = com.ravynos.driver.ACPIPlatform
+.else
 KEXT = IOACPIFamily
-INFO_PLIST = Info.plist
-BUNDLE_IDENTIFIER = com.apple.iokit.IOACPIFamily
+.endif
+INFO_PLIST ?= Info.plist
+BUNDLE_IDENTIFIER ?= com.apple.iokit.IOACPIFamily
 BUNDLE_VERSION = 1.0.0
 KERNEL_PRIVATE = yes
 
@@ -13,6 +20,10 @@ SRCS = ACPIRTC.cpp \
 	ACPIPlatformExpert.cpp \
 	IOACPIPlatformDevice.cpp \
 	util.cpp
+
+.if ${ACPI_COMPONENT} == "platform"
+SRCS := ${SRCS:NIOACPIPlatformDevice.cpp}
+.endif
 
 CFLAGS = -Wno-implicit-int-conversion -Wno-sign-conversion \
 	-I${.CURDIR}/include \
@@ -27,6 +38,10 @@ CFLAGS = -Wno-implicit-int-conversion -Wno-sign-conversion \
 	-I${.CURDIR:H}/AppleAPIC \
 	-I${.CURDIR:H}/RavynAHCIPort \
 	-I${.CURDIR:H}/ApplePS2Controller
+
+.if ${ACPI_COMPONENT} == "platform"
+CFLAGS += -DRAVYN_APPLE_ACPI_INTERFACE=1
+.endif
 
 LDFLAGS = -mmacos-version-min=${MACOS_VERSION_MIN} --sysroot=${RAVYN_SDKROOT} \
 	-fuse-ld=${LD}

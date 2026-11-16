@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -72,6 +77,7 @@
 #include <mach/shared_region.h>
 
 #include <libkern/section_keywords.h>
+#include <libkern/ravyn_amfi.h>
 
 unsigned long cs_procs_killed = 0;
 unsigned long cs_procs_invalidated = 0;
@@ -571,6 +577,8 @@ csblob_entitlements_dictionary_copy(struct cs_blob *csblob)
 	if (!csblob->csb_entitlements) {
 		return NULL;
 	}
+	if (ravyn_amfi_registered())
+		return ravyn_amfi_entitlements_dictionary(csblob->csb_entitlements);
 	osobject_retain(csblob->csb_entitlements);
 	return csblob->csb_entitlements;
 }
@@ -578,6 +586,8 @@ csblob_entitlements_dictionary_copy(struct cs_blob *csblob)
 void
 csblob_entitlements_dictionary_set(struct cs_blob *csblob, void * entitlements)
 {
+	if (ravyn_amfi_registered())
+		panic("CoreEntitlements: legacy dictionary setter is unsupported");
 	assert(csblob->csb_entitlements == NULL);
 	if (entitlements) {
 		osobject_retain(entitlements);

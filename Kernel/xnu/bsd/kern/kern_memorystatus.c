@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  *
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <kern/sched_prim.h>
 #include <kern/kalloc.h>
@@ -52,6 +57,7 @@
 #include <sys/coalition.h>
 #include <sys/kern_event.h>
 #include <sys/proc.h>
+#include <security/mac_framework.h>
 #include <sys/proc_info.h>
 #include <sys/reason.h>
 #include <sys/signal.h>
@@ -7496,6 +7502,13 @@ memorystatus_control(struct proc *p __unused, struct memorystatus_control_args *
 		}
 	}
 
+#if CONFIG_MACF
+	error = mac_proc_check_memorystatus_control(p, args->command, args->pid);
+	if (error != 0) {
+		goto out;
+	}
+#endif
+
 	switch (args->command) {
 	case MEMORYSTATUS_CMD_GET_PRIORITY_LIST:
 		error = memorystatus_cmd_get_priority_list(args->pid, args->buffer, args->buffersize, ret);
@@ -7625,6 +7638,7 @@ memorystatus_control(struct proc *p __unused, struct memorystatus_control_args *
 #endif /* CONFIG_JETSAM */
 
 	default:
+		error = EINVAL;
 		break;
 	}
 

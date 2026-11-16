@@ -2,6 +2,11 @@
  * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  *	Copyright (C) 1990,  NeXT, Inc.
  *
  *	File:	next/kern_machdep.c
@@ -65,6 +70,12 @@ grade_binary(cpu_type_t exectype, cpu_subtype_t execsubtype, bool allow_simulato
 				return 10;
 			case CPU_SUBTYPE_ARM64_ALL:
 				return 9;
+#if defined(ARM64_BOARD_CONFIG_BCM2837)
+            case CPU_SUBTYPE_ARM64E: {
+                extern boolean_t ravyn_arm64e_reference_enabled(void);
+                return ravyn_arm64e_reference_enabled() ? 8 : 0;
+            }
+#endif
 			}
 			break;
 

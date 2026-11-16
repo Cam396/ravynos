@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
 /*-
  * Copyright (c) 1983, 1990, 1993
@@ -379,6 +384,8 @@
 
 #define F_GETPATH_NOFIRMLINK       102              /* return the full path without firmlinks of the fd */
 
+#define F_GETSIGSINFO           105     /* Query attached code-signature information */
+
 // FS-specific fcntl()'s numbers begin at 0x00010000 and go up
 #define FCNTL_FS_SPECIFIC_BASE  0x00010000
 
@@ -598,6 +605,14 @@ typedef struct user_fchecklv {
 
 #endif /* KERNEL */
 
+
+/* Darwin 20 code-signature metadata query; layout is identical for ILP32/LP64. */
+#define GETSIGSINFO_PLATFORM_BINARY 1
+typedef struct fgetsigsinfo {
+	off_t fg_file_start;
+	int   fg_info_request;
+	int   fg_sig_is_platform;
+} fgetsigsinfo_t;
 
 /* lock operations for flock(2) */
 #define LOCK_SH         0x01            /* shared file lock */

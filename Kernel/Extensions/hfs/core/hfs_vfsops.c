@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Copyright (c) 1991, 1993, 1994
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -520,7 +525,10 @@ hfs_mount(struct mount *mp, vnode_t devvp, user_addr_t data, vfs_context_t conte
 #if	TARGET_OS_OSX 
 		// increment kext retain count
 		OSIncrementAtomic(&hfs_active_mounts);
-		OSKextRetainKextWithLoadTag(OSKextGetCurrentLoadTag());
+
+#ifndef RAVYN_HFS_BUILTIN
+	OSKextRetainKextWithLoadTag(OSKextGetCurrentLoadTag());
+#endif /* Static filesystem lives for the kernel lifetime. */
 		if (hfs_active_mounts <= 0 && panic_on_assert)
 			panic("hfs_mount: error - kext resource count is non-positive: %d but at least one active mount\n", hfs_active_mounts);
 #endif
@@ -2230,7 +2238,10 @@ hfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 	// decrement kext retain count
 #if	TARGET_OS_OSX
 	OSDecrementAtomic(&hfs_active_mounts);
+
+#ifndef RAVYN_HFS_BUILTIN
 	OSKextReleaseKextWithLoadTag(OSKextGetCurrentLoadTag());
+#endif /* Static filesystem lives for the kernel lifetime. */
 #endif
 
 #if HFS_LEAK_DEBUG && TARGET_OS_OSX

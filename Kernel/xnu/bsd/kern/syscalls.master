@@ -850,3 +850,19 @@
 #endif // CONFIG_COALITIONS
 533     AUE_NULL        ALL     { int log_data(unsigned int tag, unsigned int flags, void *buffer, unsigned int size) NO_SYSCALL_STUB; }
 534 AUE_NULL	ALL	{ uint64_t memorystatus_available_memory(void) NO_SYSCALL_STUB; }
+535 AUE_NULL ALL { int enosys(void); }
+536 AUE_NULL ALL { int shared_region_map_and_slide_2_np(uint32_t files_count, const struct shared_file_np *files, uint32_t mappings_count, const struct shared_file_mapping_slide_np *mappings) NO_SYSCALL_STUB; }
+
+537 AUE_NULL ALL { int nosys(void); }
+538 AUE_NULL ALL { int nosys(void); }
+539 AUE_NULL ALL { int task_read_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t); }
+540 AUE_NULL ALL { int nosys(void); }
+541 AUE_NULL ALL { int nosys(void); }
+542 AUE_NULL ALL { int nosys(void); }
+543 AUE_NULL ALL { int nosys(void); }
+544 AUE_NULL ALL { int nosys(void); }
+545 AUE_PROCINFO ALL { int proc_info_extended_id(int32_t callnum, int32_t pid, uint32_t flavor, uint32_t flags, uint64_t ext_id, uint64_t arg, user_addr_t buffer, int32_t buffersize) NO_SYSCALL_STUB; }
+
+; Monterey tracker_action is a recognized optional facility absent from this kernel.
+; Return ENOSYS without nosys/SIGSYS; do not report a successful tracker update.
+546 AUE_NULL ALL { int enosys(void); }

@@ -88,6 +88,12 @@
 						<key>Leaf</key>
 						<true/>
 					</dict>
+					<dict>
+						<key>Whole</key>
+						<true/>
+						<key>Leaf</key>
+						<true/>
+					</dict>
 				</array>
 			</dict>
 		</dict>

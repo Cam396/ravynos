@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -115,7 +120,7 @@ const mach_trap_t       mach_trap_table[MACH_TRAP_TABLE_COUNT] = {
 /* 10 */ MACH_TRAP(_kernelrpc_mach_vm_allocate_trap, 4, 5, munge_wwlw),
 /* 11 */ MACH_TRAP(_kernelrpc_mach_vm_purgable_control_trap, 4, 5, munge_wlww),
 /* 12 */ MACH_TRAP(_kernelrpc_mach_vm_deallocate_trap, 3, 5, munge_wll),
-/* 13 */ MACH_TRAP(kern_invalid, 0, 0, NULL),
+/* 13 */ MACH_TRAP(task_dyld_process_info_notify_get_trap, 2, 4, munge_ll),
 /* 14 */ MACH_TRAP(_kernelrpc_mach_vm_protect_trap, 5, 7, munge_wllww),
 /* 15 */ MACH_TRAP(_kernelrpc_mach_vm_map_trap, 6, 8, munge_wwllww),
 /* 16 */ MACH_TRAP(_kernelrpc_mach_port_allocate_trap, 3, 3, munge_www),
@@ -250,7 +255,7 @@ const char * mach_syscall_name_table[MACH_TRAP_TABLE_COUNT] = {
 /* 10 */ "_kernelrpc_mach_vm_allocate_trap",
 /* 11 */ "kern_invalid",
 /* 12 */ "_kernelrpc_mach_vm_deallocate_trap",
-/* 13 */ "kern_invalid",
+/* 13 */ "task_dyld_process_info_notify_get_trap",
 /* 14 */ "_kernelrpc_mach_vm_protect_trap",
 /* 15 */ "_kernelrpc_mach_vm_map_trap",
 /* 16 */ "_kernelrpc_mach_port_allocate_trap",
@@ -381,4 +386,20 @@ kern_invalid(
 		Debugger("kern_invalid mach trap");
 	}
 	return KERN_INVALID_ARGUMENT;
+}
+
+/* Exact pinned reference port-return classification; trap table ABI unchanged. */
+int
+mac_mach_trap_returns_port(int number)
+{
+    switch (number) {
+    case 26: /* mach_reply_port */
+    case 27: /* thread_self_trap */
+    case 28: /* task_self_trap */
+    case 29: /* host_self_trap */
+    case 50: /* thread_get_special_reply_port */
+    case 91: /* mk_timer_create_trap */
+        return 1;
+    default: return 0;
+    }
 }

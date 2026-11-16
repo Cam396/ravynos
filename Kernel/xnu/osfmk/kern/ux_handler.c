@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <kern/ux_handler.h>
 #include <sys/ux_exception.h>
@@ -255,6 +260,18 @@ catch_mach_exception_raise_state_identity(
 	__unused mach_msg_type_number_t        old_stateCnt,
 	__unused thread_state_t                new_state,
 	__unused mach_msg_type_number_t       *new_stateCnt)
+{
+	return KERN_INVALID_ARGUMENT;
+}
+
+kern_return_t
+catch_mach_exception_raise_identity_protected(
+	__unused mach_port_t               exception_port,
+	__unused uint64_t                  thread_id,
+	__unused mach_port_t               task_id_token,
+	__unused exception_type_t          exception,
+	__unused mach_exception_data_t     code,
+	__unused mach_msg_type_number_t    codeCnt)
 {
 	return KERN_INVALID_ARGUMENT;
 }

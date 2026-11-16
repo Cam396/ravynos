@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <sys/errno.h>
 
@@ -807,6 +812,20 @@ shared_region_pager_deallocate_internal(
 		 * pager structure.
 		 */
 		lck_mtx_unlock(&shared_region_pager_lock);
+		if (pager->scp_slide_info != NULL && pager->scp_slide_info->si_dynamic) {
+			struct vm_shared_region_slide_info *si = pager->scp_slide_info;
+			if (si->slide_object != VM_OBJECT_NULL) {
+				vm_object_deallocate(si->slide_object);
+				si->slide_object = VM_OBJECT_NULL;
+			}
+			if (si->slide_info_entry != NULL) {
+				kmem_free(kernel_map, (vm_offset_t)si->slide_info_entry,
+				    (vm_size_t)si->slide_info_size);
+				si->slide_info_entry = NULL;
+			}
+			pager->scp_slide_info = NULL;
+			kfree(si, sizeof(*si));
+		}
 		if (pager->sc_pgr_hdr.mo_control != MEMORY_OBJECT_CONTROL_NULL) {
 			memory_object_control_deallocate(pager->sc_pgr_hdr.mo_control);
 			pager->sc_pgr_hdr.mo_control = MEMORY_OBJECT_CONTROL_NULL;

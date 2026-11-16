@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 /*
  * Data structure definitions copied from dyld so that we can read dyld's saved UUID information
@@ -34,6 +39,9 @@
 /* Some clients check the dyld version at runtime */
 #define DYLD_ALL_IMAGE_INFOS_ADDRESS_MINIMUM_VERSION    9
 #define DYLD_ALL_IMAGE_INFOS_TIMESTAMP_MINIMUM_VERSION  15
+
+#define DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT 8
+#define DYLD_PROCESS_INFO_NOTIFY_MAGIC 0x49414E46
 
 /* Re-use dyld format for kext load addresses */
 #if __LP64__
@@ -90,7 +98,9 @@ struct user32_dyld_all_image_infos {
 	/* the following field is only in version 15 (Mac OS X 10.12, iOS 10.0) and later */
 	user32_addr_t   sharedCacheBaseAddress;
 	uint64_t        timestamp;
-	user32_addr_t   reserved[14];
+	user32_addr_t   dyldpath;
+	mach_port_name_t notifyMachPorts[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+	user32_addr_t   reserved[5];
 	/* the following fields are only in version 16 (macOS 10.13, iOS 12.0) and later */
 	user32_addr_t compact_dyld_image_info_addr;
 	user32_size_t compact_dyld_image_info_size;
@@ -128,8 +138,15 @@ struct user64_dyld_all_image_infos {
 	/* the following field is only in version 15 (macOS 10.12, iOS 10.0) and later */
 	user64_addr_t   sharedCacheBaseAddress;
 	uint64_t        timestamp;
-	user64_addr_t   reserved[14];
+	user64_addr_t   dyldPath;
+	mach_port_name_t notifyMachPorts[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+	user64_addr_t   reserved[9];
 	/* the following fields are only in version 16 (macOS 10.13, iOS 12.0) and later */
 	user64_addr_t compact_dyld_image_info_addr;
 	user64_size_t compact_dyld_image_info_size;
+	uint32_t        platform;
+	/* the following fields are only in version 17 (macOS 10.16) and later */
+	uint32_t        aotInfoArrayCount;
+	user64_addr_t   aotInfoArray;
+	uint64_t        aotTimestamp;
 };

@@ -28,6 +28,7 @@
 #include <unistd.h>
 #endif
 #include "plktool.h"
+#include "monterey_policy_alias.h"
 
 #define SAFE_FREE(a)    if(a) free(a);
 
@@ -926,6 +927,12 @@ __OSKextPerformLink(OSKextRef    aKext,
 
     kern_return_t     kxldResult = KERN_FAILURE;
     KXLDDependency   *kxldDependencies = NULL; // must free
+    unsigned char    *montereyDsepInterface = NULL; // private per-link clone
+    size_t            montereyDsepSize = 0;
+    Boolean           montereyAliasApplied = false;
+    Boolean           montereyEndpointSecurityAliasApplied = false;
+    Boolean           montereyAMFIAliasApplied = false;
+    Boolean           montereyImage4AliasApplied = false;
     CFIndex           numKxldDependencies = 0;
     kxld_addr_t       kmodInfoKern = 0;
 
@@ -1011,6 +1018,243 @@ __OSKextPerformLink(OSKextRef    aKext,
         }
     }
     
+    /*
+     * Same bundle ID/import exists on Catalina. Never infer the table ABI from
+     * either name. Explicit option + exact immutable input identity are required.
+     */
+    if (!gMontereyAMFIV80 &&
+        !strcmp(bundleIDCString, "com.apple.driver.AppleMobileFileIntegrity") &&
+        ravyn_monterey_amfi_identity(CFDataGetBytePtr(kextExecutable), CFDataGetLength(kextExecutable)))
+    {
+        fprintf(stderr, "Pinned Monterey AMFI requires explicit --monterey-amfi-v80.\n");
+        goto finish;
+    }
+    if (!gMontereyImage4V80 &&
+        !strcmp(bundleIDCString, "com.apple.security.AppleImage4") &&
+        ravyn_monterey_image4_identity(CFDataGetBytePtr(kextExecutable), CFDataGetLength(kextExecutable)))
+    {
+        fprintf(stderr, "Pinned Monterey Image4 requires explicit --monterey-image4-v80.\n");
+        goto finish;
+    }
+    if (!gMontereySandboxV80 && !strcmp(bundleIDCString, "com.apple.security.sandbox") &&
+        ravyn_monterey_sandbox_identity(CFDataGetBytePtr(kextExecutable),
+                                        CFDataGetLength(kextExecutable)))
+    {
+        fprintf(stderr, "Pinned Monterey Sandbox requires explicit --monterey-sandbox-v80.\n");
+        goto finish;
+    }
+    if (!gMontereyEndpointSecurityV80 &&
+        !strcmp(bundleIDCString, "com.apple.iokit.EndpointSecurity") &&
+        ravyn_monterey_endpointsecurity_identity(CFDataGetBytePtr(kextExecutable),
+                                                  CFDataGetLength(kextExecutable)))
+    {
+        fprintf(stderr, "Pinned Monterey EndpointSecurity requires explicit --monterey-endpointsecurity-v80.\n");
+        goto finish;
+    }
+    if (gMontereySandboxV80 && !strcmp(bundleIDCString, "com.apple.security.sandbox"))
+    {
+        unsigned found = 0;
+        if (gMontereySandboxV80Links ||
+            !ravyn_monterey_sandbox_identity(CFDataGetBytePtr(kextExecutable),
+                                             CFDataGetLength(kextExecutable)))
+        {
+            fprintf(stderr, "Monterey Sandbox donor identity mismatch or repeated link.\n");
+            goto finish;
+        }
+        for (i = 0; i < numKxldDependencies; ++i)
+        {
+            KXLDDependency *dep = &kxldDependencies[i];
+            if (dep->interface_name &&
+                !strcmp(dep->interface_name, "com.apple.kpi.dsep"))
+            {
+                ++found;
+                if (found != 1 || !dep->is_direct_dependency ||
+                    !ravyn_clone_monterey_dsep_alias(dep->interface, dep->interface_size,
+                                                   &montereyDsepInterface, &montereyDsepSize))
+                {
+                    fprintf(stderr, "Invalid Monterey private dsep alias interface.\n");
+                    goto finish;
+                }
+                dep->interface = montereyDsepInterface;
+                dep->interface_size = montereyDsepSize;
+            }
+        }
+        if (found != 1)
+        {
+            fprintf(stderr, "Missing unique direct dsep interface for Monterey Sandbox.\n");
+            goto finish;
+        }
+        {
+            unsigned char digest[SHA256_DIGEST_LENGTH];
+            char hex[SHA256_DIGEST_LENGTH * 2 + 1];
+            static const char digits[] = "0123456789abcdef";
+            SHA256(montereyDsepInterface, montereyDsepSize, digest);
+            for (unsigned j = 0; j < SHA256_DIGEST_LENGTH; ++j)
+            {
+                hex[2*j] = digits[digest[j] >> 4];
+                hex[2*j+1] = digits[digest[j] & 15];
+            }
+            hex[SHA256_DIGEST_LENGTH * 2] = 0;
+            fprintf(stdout, "MONTEREY_SANDBOX_V80 private_interface_sha256=%s\n", hex);
+        }
+        montereyAliasApplied = true;
+        fprintf(stdout, "MONTEREY_SANDBOX_V80 donor_sha256=%s alias=_mac_policy_register->_mac_policy_register_v80 private_interface_bytes=%zu\n",
+                RAVYN_MONTEREY_SANDBOX_SHA256, montereyDsepSize);
+    }
+    if (gMontereyEndpointSecurityV80 &&
+        !strcmp(bundleIDCString, "com.apple.iokit.EndpointSecurity"))
+    {
+        unsigned found = 0;
+        if (gMontereyEndpointSecurityV80Links ||
+            !ravyn_monterey_endpointsecurity_identity(CFDataGetBytePtr(kextExecutable),
+                                                      CFDataGetLength(kextExecutable)))
+        {
+            fprintf(stderr, "Monterey EndpointSecurity donor identity mismatch or repeated link.\n");
+            goto finish;
+        }
+        for (i = 0; i < numKxldDependencies; ++i)
+        {
+            KXLDDependency *dep = &kxldDependencies[i];
+            if (dep->interface_name &&
+                !strcmp(dep->interface_name, "com.apple.kpi.dsep"))
+            {
+                ++found;
+                if (found != 1 || !dep->is_direct_dependency ||
+                    !ravyn_clone_monterey_dsep_alias(dep->interface, dep->interface_size,
+                                                   &montereyDsepInterface, &montereyDsepSize))
+                {
+                    fprintf(stderr, "Invalid Monterey EndpointSecurity dsep alias interface.\n");
+                    goto finish;
+                }
+                dep->interface = montereyDsepInterface;
+                dep->interface_size = montereyDsepSize;
+            }
+        }
+        if (found != 1)
+        {
+            fprintf(stderr, "Missing unique direct dsep interface for Monterey EndpointSecurity.\n");
+            goto finish;
+        }
+        {
+            unsigned char digest[SHA256_DIGEST_LENGTH];
+            char hex[SHA256_DIGEST_LENGTH * 2 + 1];
+            static const char digits[] = "0123456789abcdef";
+            SHA256(montereyDsepInterface, montereyDsepSize, digest);
+            for (unsigned j = 0; j < SHA256_DIGEST_LENGTH; ++j)
+            {
+                hex[2*j] = digits[digest[j] >> 4];
+                hex[2*j+1] = digits[digest[j] & 15];
+            }
+            hex[SHA256_DIGEST_LENGTH * 2] = 0;
+            fprintf(stdout, "MONTEREY_ENDPOINTSECURITY_V80 private_interface_sha256=%s\n", hex);
+        }
+        montereyEndpointSecurityAliasApplied = true;
+        fprintf(stdout, "MONTEREY_ENDPOINTSECURITY_V80 donor_sha256=%s alias=_mac_policy_register->_mac_policy_register_v80 private_interface_bytes=%zu\n",
+                RAVYN_MONTEREY_ENDPOINTSECURITY_SHA256, montereyDsepSize);
+    }
+    if (gMontereyAMFIV80 &&
+        !strcmp(bundleIDCString, "com.apple.driver.AppleMobileFileIntegrity"))
+    {
+        unsigned found = 0;
+        if (gMontereyAMFIV80Links ||
+            !ravyn_monterey_amfi_identity(CFDataGetBytePtr(kextExecutable),
+                                                      CFDataGetLength(kextExecutable)))
+        {
+            fprintf(stderr, "Monterey AMFI donor identity mismatch or repeated link.\n");
+            goto finish;
+        }
+        for (i = 0; i < numKxldDependencies; ++i)
+        {
+            KXLDDependency *dep = &kxldDependencies[i];
+            if (dep->interface_name &&
+                !strcmp(dep->interface_name, "com.apple.kpi.dsep"))
+            {
+                ++found;
+                if (found != 1 || !dep->is_direct_dependency ||
+                    !ravyn_clone_monterey_dsep_alias(dep->interface, dep->interface_size,
+                                                   &montereyDsepInterface, &montereyDsepSize))
+                {
+                    fprintf(stderr, "Invalid Monterey AMFI dsep alias interface.\n");
+                    goto finish;
+                }
+                dep->interface = montereyDsepInterface;
+                dep->interface_size = montereyDsepSize;
+            }
+        }
+        if (found != 1)
+        {
+            fprintf(stderr, "Missing unique direct dsep interface for Monterey AMFI.\n");
+            goto finish;
+        }
+        {
+            unsigned char digest[SHA256_DIGEST_LENGTH];
+            char hex[SHA256_DIGEST_LENGTH * 2 + 1];
+            static const char digits[] = "0123456789abcdef";
+            SHA256(montereyDsepInterface, montereyDsepSize, digest);
+            for (unsigned j = 0; j < SHA256_DIGEST_LENGTH; ++j)
+            {
+                hex[2*j] = digits[digest[j] >> 4];
+                hex[2*j+1] = digits[digest[j] & 15];
+            }
+            hex[SHA256_DIGEST_LENGTH * 2] = 0;
+            fprintf(stdout, "MONTEREY_AMFI_V80 private_interface_sha256=%s\n", hex);
+        }
+        montereyAMFIAliasApplied = true;
+        fprintf(stdout, "MONTEREY_AMFI_V80 donor_sha256=%s alias=_mac_policy_register->_mac_policy_register_v80 private_interface_bytes=%zu\n",
+                RAVYN_MONTEREY_AMFI_SHA256, montereyDsepSize);
+    }
+    if (gMontereyImage4V80 &&
+        !strcmp(bundleIDCString, "com.apple.security.AppleImage4"))
+    {
+        unsigned found = 0;
+        if (gMontereyImage4V80Links ||
+            !ravyn_monterey_image4_identity(CFDataGetBytePtr(kextExecutable),
+                                                      CFDataGetLength(kextExecutable)))
+        {
+            fprintf(stderr, "Monterey Image4 donor identity mismatch or repeated link.\n");
+            goto finish;
+        }
+        for (i = 0; i < numKxldDependencies; ++i)
+        {
+            KXLDDependency *dep = &kxldDependencies[i];
+            if (dep->interface_name &&
+                !strcmp(dep->interface_name, "com.apple.kpi.dsep"))
+            {
+                ++found;
+                if (found != 1 || !dep->is_direct_dependency ||
+                    !ravyn_clone_monterey_dsep_alias(dep->interface, dep->interface_size,
+                                                   &montereyDsepInterface, &montereyDsepSize))
+                {
+                    fprintf(stderr, "Invalid Monterey Image4 dsep alias interface.\n");
+                    goto finish;
+                }
+                dep->interface = montereyDsepInterface;
+                dep->interface_size = montereyDsepSize;
+            }
+        }
+        if (found != 1)
+        {
+            fprintf(stderr, "Missing unique direct dsep interface for Monterey Image4.\n");
+            goto finish;
+        }
+        {
+            unsigned char digest[SHA256_DIGEST_LENGTH];
+            char hex[SHA256_DIGEST_LENGTH * 2 + 1];
+            static const char digits[] = "0123456789abcdef";
+            SHA256(montereyDsepInterface, montereyDsepSize, digest);
+            for (unsigned j = 0; j < SHA256_DIGEST_LENGTH; ++j)
+            {
+                hex[2*j] = digits[digest[j] >> 4];
+                hex[2*j+1] = digits[digest[j] & 15];
+            }
+            hex[SHA256_DIGEST_LENGTH * 2] = 0;
+            fprintf(stdout, "MONTEREY_IMAGE4_V80 private_interface_sha256=%s\n", hex);
+        }
+        montereyImage4AliasApplied = true;
+        fprintf(stdout, "MONTEREY_IMAGE4_V80 donor_sha256=%s alias=_mac_policy_register->_mac_policy_register_v80 private_interface_bytes=%zu\n",
+                RAVYN_MONTEREY_IMAGE4_SHA256, montereyDsepSize);
+    }
+
     kxldResult = kxld_link_file(kxldContext,
                                 (void *) CFDataGetBytePtr(kextExecutable),
                                 CFDataGetLength(kextExecutable),
@@ -1054,9 +1298,18 @@ __OSKextPerformLink(OSKextRef    aKext,
         }
     } // relocBytes... 
 
+    if (montereyAliasApplied)
+        ++gMontereySandboxV80Links;
+    if (montereyEndpointSecurityAliasApplied)
+        ++gMontereyEndpointSecurityV80Links;
+    if (montereyAMFIAliasApplied)
+        ++gMontereyAMFIV80Links;
+    if (montereyImage4AliasApplied)
+        ++gMontereyImage4V80Links;
     result = true;
 
 finish:
+    free(montereyDsepInterface);
     if (kxldDependencies)
         free(kxldDependencies);
     if (kextExecutable)

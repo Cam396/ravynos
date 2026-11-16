@@ -19,6 +19,11 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <IOKit/assert.h>
 #include <IOKit/IODeviceTreeSupport.h>
@@ -680,6 +685,40 @@ void CLASS::constructAddressingProperties(IOPCIConfigEntry * device, OSDictionar
                 assignedData.physHi.s.reloc = 1;
                 assignedData.physMid = (range->start >> 32ULL);
                 assignedData.physLo  = range->start;
+                // The legacy host bridge can retain firmware BAR addresses
+                // without allocator windows. Publish only a hardware-verified
+                // BAR extent; never invent a broad host MMIO/RAM aperture.
+                int firmwareResources = 0;
+                PE_parse_boot_argn("ravyn_pci_firmware_resources", &firmwareResources,
+                                   sizeof(firmwareResources));
+                if (firmwareResources && !device->isBridge && !range->size
+                    && i < kIOPCIRangeExpansionROM && range->proposedSize
+                    && !(range->proposedSize & (range->proposedSize - 1))
+                    && !(range->start & (range->proposedSize - 1))
+                    && range->start <= (~0ULL - range->proposedSize))
+                {
+                    uint32_t bar = configRead32(device, barRegisters[i]);
+                    uint64_t hardwareStart = (bar & 1) ? (bar & ~3U) : (bar & ~15U);
+                    bool valid = (bar != 0xffffffffU)
+                        && (((bar & 1) != 0) == (range->type == kIOPCIResourceTypeIO));
+                    if (!(bar & 1) && ((bar & 6) == 4))
+                    {
+                        valid &= (i < (kIOPCIRangeExpansionROM - 1));
+                        if (valid) hardwareStart |= ((uint64_t)configRead32(device,
+                                                        barRegisters[i + 1])) << 32;
+                    }
+                    else if (!(bar & 1) && (bar & 6)) valid = false;
+                    if (valid && hardwareStart == range->start)
+                    {
+                        assignedData.lengthHi = range->proposedSize >> 32;
+                        assignedData.lengthLo = range->proposedSize;
+                        propTable->setObject("RavynPCIFirmwareResources", kOSBooleanTrue);
+                        kprintf("RAVYN-PCI-FIRMWARE %u:%u:%u bar=0x%x base=0x%llx length=0x%llx\n",
+                                device->space.s.busNum, device->space.s.deviceNum,
+                                device->space.s.functionNum, barRegisters[i],
+                                range->start, range->proposedSize);
+                    }
+                }
                 assignedProp->appendBytes(&assignedData, sizeof(assignedData));
             }
 			// reg gets requested length

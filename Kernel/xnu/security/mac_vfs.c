@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /*-
  * Copyright (c) 1999, 2000, 2001, 2002 Robert N. M. Watson
  * Copyright (c) 2001 Ilmar S. Habibulin
@@ -73,6 +78,7 @@
 
 #include <sys/file_internal.h>
 #include <sys/imgact.h>
+#include <libkern/ravyn_amfi.h>
 #include <sys/namei.h>
 #include <sys/mount_internal.h>
 #include <sys/pipe.h>
@@ -828,7 +834,7 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 				continue;
 			}
 
-			mpo_cred_label_update_execve_t *hook = mpc->mpc_ops->mpo_cred_label_update_execve;
+			mpo_cred_label_update_execve_t *hook = mac_policy_ops_for_legacy(mpc)->mpo_cred_label_update_execve;
 			if (hook == NULL) {
 				continue;
 			}
@@ -847,7 +853,7 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 					continue;
 				}
 
-				mpo_cred_label_update_execve_t *hook = mpc->mpc_ops->mpo_cred_label_update_execve;
+				mpo_cred_label_update_execve_t *hook = mac_policy_ops_for_legacy(mpc)->mpo_cred_label_update_execve;
 				if (hook == NULL) {
 					continue;
 				}
@@ -899,7 +905,7 @@ mac_cred_check_label_update_execve(vfs_context_t ctx, struct vnode *vp, off_t of
 				continue;
 			}
 
-			mpo_cred_check_label_update_execve_t *hook = mpc->mpc_ops->mpo_cred_check_label_update_execve;
+			mpo_cred_check_label_update_execve_t *hook = mac_policy_ops_for_legacy(mpc)->mpo_cred_check_label_update_execve;
 			if (hook == NULL) {
 				continue;
 			}
@@ -916,7 +922,7 @@ mac_cred_check_label_update_execve(vfs_context_t ctx, struct vnode *vp, off_t of
 					continue;
 				}
 
-				mpo_cred_check_label_update_execve_t *hook = mpc->mpc_ops->mpo_cred_check_label_update_execve;
+				mpo_cred_check_label_update_execve_t *hook = mac_policy_ops_for_legacy(mpc)->mpo_cred_check_label_update_execve;
 				if (hook == NULL) {
 					continue;
 				}
@@ -1033,7 +1039,11 @@ mac_vnode_check_create(vfs_context_t ctx, struct vnode *dvp,
     struct componentname *cnp, struct vnode_attr *vap)
 {
 	kauth_cred_t cred;
+	proc_t p;
 	int error;
+	int ravyn_trace;
+	u_int i;
+	struct mac_policy_conf *mpc;
 
 #if SECURITY_MAC_CHECK_ENFORCE
 	/* 21167099 - only check if we allow write */
@@ -1046,7 +1056,51 @@ mac_vnode_check_create(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(33, dvp);
-	MAC_CHECK(vnode_check_create, cred, dvp, dvp->v_label, cnp, vap);
+	p = vfs_context_proc(ctx);
+	ravyn_trace = p != NULL && !strcmp(p->p_comm, "logd") &&
+	    cnp != NULL && cnp->cn_nameptr != NULL &&
+	    cnp->cn_namelen == 8 && !strncmp(cnp->cn_nameptr, "timesync", 8);
+	if (ravyn_trace) {
+		const struct mac_policy_ops *ops;
+		int policy_error;
+
+		/* Preserve MAC_CHECK ordering and error selection while attributing
+		 * this single logd create denial to the policy that returned it. */
+		error = 0;
+		for (i = 0; i < mac_policy_list.staticmax; i++) {
+			mpc = mac_policy_list.entries[i].mpc;
+			if (mpc == NULL) {
+				continue;
+			}
+			ops = mac_policy_ops_for_legacy(mpc);
+			if (ops->mpo_vnode_check_create != NULL) {
+				policy_error = ops->mpo_vnode_check_create(cred, dvp,
+				    dvp->v_label, cnp, vap);
+				printf("RAVYN-MAC-CREATE policy=%s error=%d\n",
+				    mpc->mpc_name, policy_error);
+				error = mac_error_select(policy_error, error);
+			}
+		}
+		if (mac_policy_list_conditional_busy() != 0) {
+			for (; i <= mac_policy_list.maxindex; i++) {
+				mpc = mac_policy_list.entries[i].mpc;
+				if (mpc == NULL) {
+					continue;
+				}
+				ops = mac_policy_ops_for_legacy(mpc);
+				if (ops->mpo_vnode_check_create != NULL) {
+					policy_error = ops->mpo_vnode_check_create(cred,
+					    dvp, dvp->v_label, cnp, vap);
+					printf("RAVYN-MAC-CREATE policy=%s error=%d\n",
+					    mpc->mpc_name, policy_error);
+					error = mac_error_select(policy_error, error);
+				}
+			}
+			mac_policy_list_unbusy();
+		}
+	} else {
+		MAC_CHECK(vnode_check_create, cred, dvp, dvp->v_label, cnp, vap);
+	}
 	VFS_KERNEL_DEBUG_END1(33, dvp);
 	return error;
 }
@@ -1194,8 +1248,13 @@ mac_vnode_check_getattr(vfs_context_t ctx, struct ucred *file_cred,
 }
 
 int
-mac_vnode_check_getattrlist(vfs_context_t ctx, struct vnode *vp,
-    struct attrlist *alist)
+mac_vnode_check_getattrlist(vfs_context_t ctx, struct vnode *vp, struct attrlist *alist)
+{
+	return mac_vnode_check_getattrlist_v80(ctx, vp, alist, 0);
+}
+
+int
+mac_vnode_check_getattrlist_v80(vfs_context_t ctx, struct vnode *vp, struct attrlist *alist, uint64_t options)
 {
 	kauth_cred_t cred;
 	int error;
@@ -1211,7 +1270,8 @@ mac_vnode_check_getattrlist(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(40, vp);
-	MAC_CHECK(vnode_check_getattrlist, cred, vp, vp->v_label, alist);
+	MAC_CHECK_ABI(vnode_check_getattrlist, (cred, vp, vp->v_label, alist),
+	    (cred, vp, vp->v_label, alist, options), 1, 1);
 	VFS_KERNEL_DEBUG_END1(40, vp);
 
 	/* Falsify results instead of returning error? */
@@ -1250,7 +1310,7 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 				continue;
 			}
 
-			mpo_vnode_check_exec_t *hook = mpc->mpc_ops->mpo_vnode_check_exec;
+			mpo_vnode_check_exec_t *hook = mac_policy_ops_for_legacy(mpc)->mpo_vnode_check_exec;
 			if (hook == NULL) {
 				continue;
 			}
@@ -1271,7 +1331,7 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 					continue;
 				}
 
-				mpo_vnode_check_exec_t *hook = mpc->mpc_ops->mpo_vnode_check_exec;
+				mpo_vnode_check_exec_t *hook = mac_policy_ops_for_legacy(mpc)->mpo_vnode_check_exec;
 				if (hook == NULL) {
 					continue;
 				}
@@ -1338,8 +1398,11 @@ mac_vnode_check_signature(struct vnode *vp, struct cs_blob *cs_blob,
 #endif
 
 	VFS_KERNEL_DEBUG_START1(43, vp);
-	MAC_CHECK(vnode_check_signature, vp, vp->v_label, cpu_type, cs_blob,
-	    cs_flags, signer_type, flags, &fatal_failure_desc, &fatal_failure_desc_len);
+	MAC_CHECK_ABI(vnode_check_signature,
+	    (vp, vp->v_label, cpu_type, cs_blob, cs_flags, signer_type, flags,
+	     &fatal_failure_desc, &fatal_failure_desc_len),
+	    (vp, vp->v_label, cpu_type, cs_blob, cs_flags, signer_type, flags,
+	     ravyn_csblob_macho_platform(cs_blob), &fatal_failure_desc, &fatal_failure_desc_len), 1, 1);
 	VFS_KERNEL_DEBUG_END1(43, vp);
 
 	if (fatal_failure_desc_len) {
@@ -1479,6 +1542,12 @@ mac_vnode_check_getextattr(vfs_context_t ctx, struct vnode *vp,
 int
 mac_vnode_check_ioctl(vfs_context_t ctx, struct vnode *vp, u_int cmd)
 {
+	return mac_vnode_check_ioctl_v80(ctx, vp, cmd);
+}
+
+int
+mac_vnode_check_ioctl_v80(vfs_context_t ctx, struct vnode *vp, u_long cmd)
+{
 	kauth_cred_t cred;
 	int error;
 
@@ -1493,7 +1562,8 @@ mac_vnode_check_ioctl(vfs_context_t ctx, struct vnode *vp, u_int cmd)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(46, vp);
-	MAC_CHECK(vnode_check_ioctl, cred, vp, vp->v_label, cmd);
+	MAC_CHECK_ABI(vnode_check_ioctl, (cred, vp, vp->v_label, (u_int)cmd),
+	    (cred, vp, vp->v_label, cmd), cmd <= (u_int)-1, 1);
 	VFS_KERNEL_DEBUG_END1(46, vp);
 	return error;
 }
@@ -1796,6 +1866,12 @@ mac_vnode_check_revoke(vfs_context_t ctx, struct vnode *vp)
 int
 mac_vnode_check_searchfs(vfs_context_t ctx, struct vnode *vp, struct attrlist *alist)
 {
+	return mac_vnode_check_searchfs_v80(ctx, vp, NULL, alist);
+}
+
+int
+mac_vnode_check_searchfs_v80(vfs_context_t ctx, struct vnode *vp, struct attrlist *returnattrs, struct attrlist *alist)
+{
 	kauth_cred_t cred;
 	int error;
 
@@ -1810,7 +1886,8 @@ mac_vnode_check_searchfs(vfs_context_t ctx, struct vnode *vp, struct attrlist *a
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(59, vp);
-	MAC_CHECK(vnode_check_searchfs, cred, vp, vp->v_label, alist);
+	MAC_CHECK_ABI(vnode_check_searchfs, (cred, vp, vp->v_label, alist),
+	    (cred, vp, vp->v_label, returnattrs, alist), 1, returnattrs != NULL);
 	VFS_KERNEL_DEBUG_END1(59, vp);
 	return error;
 }
@@ -2524,6 +2601,12 @@ mac_mount_check_label_update(vfs_context_t ctx, struct mount *mount)
 int
 mac_mount_check_fsctl(vfs_context_t ctx, struct mount *mp, u_int cmd)
 {
+	return mac_mount_check_fsctl_v80(ctx, mp, cmd);
+}
+
+int
+mac_mount_check_fsctl_v80(vfs_context_t ctx, struct mount *mp, u_long cmd)
+{
 	kauth_cred_t cred;
 	int error;
 
@@ -2538,7 +2621,8 @@ mac_mount_check_fsctl(vfs_context_t ctx, struct mount *mp, u_int cmd)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(88, mp);
-	MAC_CHECK(mount_check_fsctl, cred, mp, mp->mnt_mntlabel, cmd);
+	MAC_CHECK_ABI(mount_check_fsctl, (cred, mp, mp->mnt_mntlabel, (u_int)cmd),
+	    (cred, mp, mp->mnt_mntlabel, cmd), cmd <= (u_int)-1, 1);
 	VFS_KERNEL_DEBUG_END1(88, mp);
 
 	return error;
@@ -2755,4 +2839,53 @@ mac_vnode_label_set(struct vnode *vp, int slot, intptr_t v)
 		l = vp->v_label;
 	}
 	mac_label_set(l, slot, v);
+}
+
+
+int
+mac_vnode_check_copyfile(vfs_context_t ctx, struct vnode *dvp,
+    struct vnode *tvp, struct vnode *fvp, struct componentname *cnp,
+    mode_t mode, int flags)
+{
+	kauth_cred_t cred;
+	int error;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_vnode_enforce) {
+		return 0;
+	}
+#endif
+	cred = vfs_context_ucred(ctx);
+	if (!mac_cred_check_enforce(cred)) {
+		return 0;
+	}
+	VFS_KERNEL_DEBUG_START1(97, dvp);
+	MAC_CHECK_V80(vnode_check_copyfile, (cred, dvp, dvp->v_label, tvp, tvp ? tvp->v_label : NULL, fvp, fvp->v_label, cnp, mode, flags));
+	VFS_KERNEL_DEBUG_END1(97, dvp);
+	return error;
+}
+
+
+int
+mac_mount_check_quotactl(vfs_context_t ctx, struct mount *mp, int cmd, int id)
+{
+	kauth_cred_t cred;
+	int error;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_vnode_enforce) {
+		return 0;
+	}
+#endif
+	cred = vfs_context_ucred(ctx);
+	if (!mac_cred_check_enforce(cred)) {
+		return 0;
+	}
+	VFS_KERNEL_DEBUG_START1(95, mp);
+	MAC_CHECK_V80(mount_check_quotactl, (cred, mp, cmd, id));
+	VFS_KERNEL_DEBUG_END1(95, mp);
+
+	return error;
 }

@@ -25,8 +25,14 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <string.h>
+#include <security/mac_framework.h>
 
 #include <kern/thread_call.h>
 #include <kern/zalloc.h>
@@ -1310,7 +1316,7 @@ necp_address_is_wildcard(const union necp_sockaddr_union * const addr)
 }
 
 static int
-necp_find_fd_data(int fd, struct necp_fd_data **fd_data)
+necp_find_fd_data(int fd, struct necp_fd_data **fd_data, struct fileglob **fg)
 {
 	proc_t p = current_proc();
 	struct fileproc *fp = NULL;
@@ -1335,6 +1341,9 @@ necp_find_fd_data(int fd, struct necp_fd_data **fd_data)
 	}
 
 done:
+	if (error == 0) {
+		*fg = fp->f_fglob;
+	}
 	proc_fdunlock(p);
 	return error;
 }
@@ -4494,6 +4503,14 @@ necp_open(struct proc *p, struct necp_open_args *uap, int *retval)
 		}
 	}
 
+
+#if CONFIG_MACF
+	error = mac_necp_check_open(p, uap->flags);
+	if (error != 0) {
+		goto done;
+	}
+#endif
+
 	error = falloc(p, &fp, &fd, vfs_context_current());
 	if (error != 0) {
 		goto done;
@@ -6143,13 +6160,21 @@ necp_client_action(struct proc *p, struct necp_client_action_args *uap, int *ret
 	int error = 0;
 	int return_value = 0;
 	struct necp_fd_data *fd_data = NULL;
-	error = necp_find_fd_data(uap->necp_fd, &fd_data);
+	struct fileglob *fg = NULL;
+	error = necp_find_fd_data(uap->necp_fd, &fd_data, &fg);
 	if (error != 0) {
 		NECPLOG(LOG_ERR, "necp_client_action find fd error (%d)", error);
 		return error;
 	}
 
 	u_int32_t action = uap->action;
+#if CONFIG_MACF
+	error = mac_necp_check_client_action(p, fg, action);
+	if (error != 0) {
+		file_drop(uap->necp_fd);
+		return error;
+	}
+#endif
 	switch (action) {
 	case NECP_CLIENT_ACTION_ADD: {
 		return_value = necp_client_add(p, fd_data, uap, retval);

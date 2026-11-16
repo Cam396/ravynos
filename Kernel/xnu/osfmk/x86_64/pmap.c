@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -735,6 +740,8 @@ pmap_pv_fixup(vm_offset_t start_va, vm_offset_t end_va)
  *	Called by vm_init, to initialize any structures that the pmap
  *	system needs to map virtual memory.
  */
+extern void ravyn_amfi_signing_init(void);
+
 void
 pmap_init(void)
 {
@@ -744,6 +751,8 @@ pmap_init(void)
 	vm_map_offset_t         vaddr;
 	ppnum_t ppn;
 
+
+	ravyn_amfi_signing_init();
 
 	kernel_pmap->pm_obj_pml4 = &kpml4obj_object_store;
 	_vm_object_allocate((vm_object_size_t)NPML4PGS * PAGE_SIZE, &kpml4obj_object_store);

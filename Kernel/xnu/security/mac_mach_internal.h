@@ -25,6 +25,11 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /*-
  * Copyright (c) 2005 SPARTA, Inc.
  * All rights reserved.
@@ -67,12 +72,34 @@ struct task;
 
 int	mac_do_machexc(int64_t code, int64_t subcode, uint32_t flags __unused);
 int	mac_schedule_userret(void);
+int mac_schedule_telemetry(void);
+void mac_thread_telemetry(struct thread *, int, const void *, size_t);
 
 #if CONFIG_MACF
+
+/* Explicit task-filter backend. Masks remain policy-owned borrowed bitstrings,
+ * just as the legacy UNIX mask; owners must keep installed masks alive. */
+typedef int (*mac_task_mach_filter_cbfunc_t)(struct proc *, int);
+typedef int (*mac_task_kobj_filter_cbfunc_t)(struct proc *, int, int);
+extern int mach_kobj_count;
+extern int mach_trap_count;
+int ipc_kobject_set_kobjidx(int, int);
+void mac_task_set_mach_filter_mask(struct task *, uint8_t *);
+void mac_task_set_kobj_filter_mask(struct task *, uint8_t *);
+uint8_t *task_get_mach_trap_filter_mask(struct task *);
+uint8_t *task_get_mach_kobj_filter_mask(struct task *);
+void task_copy_filter_masks(struct task *, struct task *);
+int mac_task_register_filter_callbacks(mac_task_mach_filter_cbfunc_t,
+    mac_task_kobj_filter_cbfunc_t);
+int mac_task_check_mach_filter(struct task *, struct proc *, int);
+int mac_task_check_kobj_filter(struct task *, struct proc *, int, int);
+
 void mac_policy_init(void);
 void mac_policy_initmach(void);
 
 /* tasks */
+int mac_task_check_get_movable_control_port(void);
+int mac_task_check_dyld_process_info_notify_register(void);
 int	mac_task_check_expose_task(struct task *t);
 
 int	mac_task_check_set_host_special_port(struct task *task,

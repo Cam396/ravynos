@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -133,13 +138,19 @@ typedef natural_t       ipc_kobject_type_t;
 #define IKOT_UEXT_OBJECT                41
 #define IKOT_ARCADE_REG                 42
 
+#define IKOT_TASK_READ                  45
+#define IKOT_THREAD_INSPECT             46
+#define IKOT_THREAD_READ                47
+
 #define IKOT_SUID_CRED                  48
 
 /*
  * Add new entries here and adjust IKOT_UNKNOWN.
  * Please keep ipc/ipc_object.c:ikot_print_array up to date.
  */
-#define IKOT_UNKNOWN                    49      /* magic catchall       */
+/* 49 reserved for modern TASK_INSPECT; do not reuse it for tokens. */
+#define IKOT_TASK_ID_TOKEN              50
+#define IKOT_UNKNOWN                    51      /* magic catchall       */
 #define IKOT_MAX_TYPE   (IKOT_UNKNOWN+1)        /* # of IKOT_ types	*/
 
 #ifdef MACH_KERNEL_PRIVATE
@@ -151,6 +162,7 @@ struct ipc_kobject_label {
 
 /* initialization of kobject subsystem */
 extern void ipc_kobject_init(void);
+extern kern_return_t ipc_kobject_set_kobjidx(int, int);
 
 /* Dispatch a kernel server function */
 extern ipc_kmsg_t ipc_kobject_server(

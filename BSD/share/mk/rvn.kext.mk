@@ -14,9 +14,13 @@ SDKROOT = ${RAVYN_SDKROOT}
 SRCS += kmod_info.c
 OBJS = ${SRCS:C/\..*$/.o/}
 
-CFLAGS += -DKERNEL --sysroot=${SDKROOT} -I${SDKROOT}/usr/include \
+CFLAGS += -DKERNEL --sysroot=${SDKROOT} \
+	-I${SDKROOT}/System/Library/Frameworks/Kernel.framework/Headers \
+	-I${SDKROOT}/usr/include \
 	-I${SDKROOT}/usr/local/include -I${SDKROOT}/usr/local/include/kernel
-CXXFLAGS += -fapple-kext ${CFLAGS}
+# Keep kernel destructor sections; LLVM otherwise rewrites them to userland atexit.
+CXXFLAGS += -fapple-kext -fno-use-cxa-atexit \
+	-mllvm -disable-atexit-based-global-dtor-lowering ${CFLAGS}
 LDFLAGS += -nostdlib -Wl,-bundle -Wl,-undefined,dynamic_lookup \
 	-Wl,-kext -Wl,-segalign,0x1000
 
@@ -59,7 +63,7 @@ all: ${_KEXT_LIB}
 ${_KEXT_FOLDER}:
 	mkdir -p ${.TARGET}/Contents/MacOS
 
-${_KEXT_FOLDER}/Contents/Info.plist: ${.CURDIR}/${INFO_PLIST}
+${_KEXT_FOLDER}/Contents/Info.plist: ${_KEXT_FOLDER} ${.CURDIR}/${INFO_PLIST}
 	sed -e 's/@BUNDLE_IDENTIFIER@/${BUNDLE_IDENTIFIER}/' \
 	    -e 's/@BUNDLE_VERSION@/${BUNDLE_VERSION}/' \
 	    ${.CURDIR}/${INFO_PLIST} >${.TARGET}
@@ -73,7 +77,7 @@ ${_KEXT_LIB}: ${SDKROOT}/usr/local/lib/kernel/libkmod.a
 .endif
 
 kmod_info.c: ${.OBJDIR}/kmod_info.c
-${.OBJDIR}/kmod_info.c:
+${.OBJDIR}/kmod_info.c: ${.MAKE.MAKEFILES}
 	(echo '#include <mach/kmod.h>'; \
 	 echo 'extern kern_return_t _start(kmod_info_t *ki, void *data);'; \
 	 echo 'extern kern_return_t _stop(kmod_info_t *ki, void *data);'; \

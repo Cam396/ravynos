@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Copyright (c) 1999, 2000, 2001, 2002 Robert N. M. Watson
  * Copyright (c) 2001 Ilmar S. Habibulin
  * Copyright (c) 2001, 2002, 2003, 2004 Networks Associates Technology, Inc.
@@ -279,8 +284,8 @@ mac_audit_check_preselect(struct ucred *cred, unsigned short syscode, void *args
 			continue;
 		}
 
-		if (mpc->mpc_ops->mpo_audit_check_preselect != NULL) {
-			error = mpc->mpc_ops->mpo_audit_check_preselect(cred,
+		if (mac_policy_ops_for_legacy(mpc)->mpo_audit_check_preselect != NULL) {
+			error = mac_policy_ops_for_legacy(mpc)->mpo_audit_check_preselect(cred,
 			    syscode, args);
 			ret = (ret > error ? ret : error);
 		}
@@ -292,8 +297,8 @@ mac_audit_check_preselect(struct ucred *cred, unsigned short syscode, void *args
 				continue;
 			}
 
-			if (mpc->mpc_ops->mpo_audit_check_preselect != NULL) {
-				error = mpc->mpc_ops->mpo_audit_check_preselect(cred,
+			if (mac_policy_ops_for_legacy(mpc)->mpo_audit_check_preselect != NULL) {
+				error = mac_policy_ops_for_legacy(mpc)->mpo_audit_check_preselect(cred,
 				    syscode, args);
 				ret = (ret > error ? ret : error);
 			}
@@ -327,8 +332,8 @@ mac_audit_check_postselect(struct ucred *cred, unsigned short syscode,
 			continue;
 		}
 
-		if (mpc->mpc_ops->mpo_audit_check_postselect != NULL) {
-			mac_error = mpc->mpc_ops->mpo_audit_check_postselect(cred,
+		if (mac_policy_ops_for_legacy(mpc)->mpo_audit_check_postselect != NULL) {
+			mac_error = mac_policy_ops_for_legacy(mpc)->mpo_audit_check_postselect(cred,
 			    syscode, args, error, retval);
 			ret = (ret > mac_error ? ret : mac_error);
 		}
@@ -340,8 +345,8 @@ mac_audit_check_postselect(struct ucred *cred, unsigned short syscode,
 				continue;
 			}
 
-			if (mpc->mpc_ops->mpo_audit_check_postselect != NULL) {
-				mac_error = mpc->mpc_ops->mpo_audit_check_postselect(cred,
+			if (mac_policy_ops_for_legacy(mpc)->mpo_audit_check_postselect != NULL) {
+				mac_error = mac_policy_ops_for_legacy(mpc)->mpo_audit_check_postselect(cred,
 				    syscode, args, error, retval);
 				ret = (ret > mac_error ? ret : mac_error);
 			}

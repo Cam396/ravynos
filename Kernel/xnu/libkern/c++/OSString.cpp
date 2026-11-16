@@ -25,12 +25,18 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* IOString.m created by rsulack on Wed 17-Sep-1997 */
 /* IOString.cpp converted to C++ on Tue 1998-9-22 */
 
 #include <string.h>
 
 #include <libkern/c++/OSString.h>
+#include <libkern/c++/OSSharedPtr.h>
 #include <libkern/c++/OSSerialize.h>
 #include <libkern/c++/OSLib.h>
 #include <libkern/c++/OSData.h>
@@ -182,6 +188,19 @@ OSString::withCString(const char *cString)
 	}
 
 	return me;
+}
+
+/* Monterey's bounded factory clamps at an earlier NUL. The legacy explicit-
+ * length initializer instead rejects early NUL, so bound before calling it.
+ * OSSharedPtr is trivial_abi: the owning result remains in RAX on x86_64. */
+OSSharedPtr<OSString>
+OSString::withCString(const char *cString, size_t maxLength)
+{
+	if (cString == NULL || maxLength >= kMaxStringLength) {
+		return nullptr;
+	}
+	return OSSharedPtr<OSString>(withStringOfLength(cString,
+	           strnlen(cString, maxLength)), OSNoRetain);
 }
 
 OSString *

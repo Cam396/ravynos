@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -86,6 +91,13 @@
 #include <sys/kdebug.h>
 
 #include <san/kasan.h>
+#if defined(__x86_64__)
+#include <pexpert/pexpert.h>
+#include <pexpert/i386/boot.h>
+#include <pexpert/i386/efi.h>
+#include <i386/machine_routines.h>
+#endif
+
 
 /*
  *	Variables exported by this module.
@@ -1497,6 +1509,40 @@ kmem_init(
 	}
 #endif
 
+#if defined(__x86_64__)
+	/* Firmware runtime aliases may lie beyond the boot image reservation.
+	 * Reserve them before any kernel heap can claim their virtual addresses.
+	 * Regions below map_start are already covered by the bootstrap entry.
+	 */
+	boot_args *efi_args = (boot_args *)PE_state.bootArgs;
+	unsigned int efi_stride = efi_args->MemoryMapDescriptorSize;
+	if (efi_stride >= sizeof(EfiMemoryRange) &&
+	    efi_args->MemoryMapSize % efi_stride == 0) {
+		EfiMemoryRange *efi_map = (EfiMemoryRange *)ml_static_ptovirt(efi_args->MemoryMap);
+		for (unsigned int off = 0; off < efi_args->MemoryMapSize; off += efi_stride) {
+			EfiMemoryRange *region = (EfiMemoryRange *)((char *)efi_map + off);
+			if (!(region->Attribute & EFI_MEMORY_RUNTIME) || !region->NumberOfPages) continue;
+			vm_map_offset_t lo = region->VirtualStart;
+			if (lo < VM_MIN_KERNEL_ADDRESS) lo |= VM_MIN_KERNEL_ADDRESS;
+			if (region->NumberOfPages > (~(vm_map_offset_t)0 >> PAGE_SHIFT))
+				panic("EFI runtime region size overflow");
+			vm_map_size_t bytes = region->NumberOfPages << PAGE_SHIFT;
+			vm_map_offset_t hi = lo + bytes;
+			if (hi < lo || lo < VM_MIN_KERNEL_AND_KEXT_ADDRESS || hi > map_end)
+				panic("EFI runtime alias outside kernel map");
+			if (hi <= map_start) continue;
+			if (lo < map_start) lo = map_start;
+			vm_map_kernel_flags_t efi_flags = VM_MAP_KERNEL_FLAGS_NONE;
+			efi_flags.vmkf_permanent = TRUE;
+			efi_flags.vmkf_no_pmap_check = TRUE;
+			kern_return_t efi_kr = vm_map_enter(kernel_map, &lo, hi - lo, 0,
+			    VM_FLAGS_FIXED, efi_flags, VM_KERN_MEMORY_IOKIT, VM_OBJECT_NULL,
+			    0, FALSE, VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_DEFAULT);
+			if (efi_kr != KERN_SUCCESS)
+				panic("EFI runtime alias reservation failed: %d", efi_kr);
+		}
+	}
+#endif
 	kmem_set_user_wire_limits();
 }
 
@@ -1552,21 +1598,56 @@ copyoutmap(
 	vm_map_address_t        toaddr,
 	vm_size_t               length)
 {
+	kern_return_t kr = KERN_SUCCESS;
+	vm_map_t oldmap;
+
 	if (vm_map_pmap(map) == pmap_kernel()) {
 		/* assume a correct copy */
 		memcpy(CAST_DOWN(void *, toaddr), fromdata, length);
-		return KERN_SUCCESS;
+	} else if (current_map() == map) {
+		if (copyout(fromdata, toaddr, length) != 0) {
+			kr = KERN_INVALID_ADDRESS;
+		}
+	} else {
+		vm_map_reference(map);
+		oldmap = vm_map_switch(map);
+		if (copyout(fromdata, toaddr, length) != 0) {
+			kr = KERN_INVALID_ADDRESS;
+		}
+		vm_map_switch(oldmap);
+		vm_map_deallocate(map);
 	}
+	return kr;
+}
 
-	if (current_map() != map) {
-		return KERN_NOT_SUPPORTED;
+/*
+ *	Like copyoutmap, but perform a 32-bit copyout atomically.
+ */
+kern_return_t
+copyoutmap_atomic32(
+	vm_map_t                map,
+	uint32_t                value,
+	vm_map_address_t        toaddr)
+{
+	kern_return_t kr = KERN_SUCCESS;
+	vm_map_t oldmap;
+
+	if (vm_map_pmap(map) == pmap_kernel()) {
+		*(uint32_t *)toaddr = value;
+	} else if (current_map() == map) {
+		if (copyout_atomic32(value, toaddr) != 0) {
+			kr = KERN_INVALID_ADDRESS;
+		}
+	} else {
+		vm_map_reference(map);
+		oldmap = vm_map_switch(map);
+		if (copyout_atomic32(value, toaddr) != 0) {
+			kr = KERN_INVALID_ADDRESS;
+		}
+		vm_map_switch(oldmap);
+		vm_map_deallocate(map);
 	}
-
-	if (copyout(fromdata, toaddr, length) != 0) {
-		return KERN_INVALID_ADDRESS;
-	}
-
-	return KERN_SUCCESS;
+	return kr;
 }
 
 /*

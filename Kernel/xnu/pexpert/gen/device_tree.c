@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 
@@ -420,4 +425,132 @@ DTRestartPropertyIteration(DTPropertyIterator iter)
 	iter->currentProperty = NULL;
 	iter->currentIndex = 0;
 	return kSuccess;
+}
+
+
+/* Bounded read-only Intel DT APIs required by Monterey AppleImage4.
+ * The region size comes from the actual EFI boot_args, not a guessed tree walk.
+ * Legacy DT entry points retain their existing ABI and behavior. */
+static uintptr_t secure_dt_start, secure_dt_end;
+
+void
+DTSecureInit(void *base, unsigned int size)
+{
+    uintptr_t start = (uintptr_t)base;
+    if (!base || size < sizeof(DeviceTreeNode) || start > UINTPTR_MAX - size)
+        panic("invalid bounded EFI device tree region");
+    DTInit(base);
+    secure_dt_start = start;
+    secure_dt_end = start + size;
+}
+
+static int
+secure_dt_range(const void *pointer, size_t size)
+{
+    uintptr_t address = (uintptr_t)pointer;
+    return secure_dt_start && address >= secure_dt_start &&
+        address <= secure_dt_end && size <= secure_dt_end - address &&
+        (address & 3) == 0;
+}
+
+static const char *
+secure_dt_find_zero(const void *data, size_t length)
+{
+    const char *bytes = data;
+    for (size_t i = 0; i < length; i++) if (bytes[i] == 0) return bytes + i;
+    return NULL;
+}
+
+static const DeviceTreeNodeProperty *
+secure_dt_next_property(const DeviceTreeNodeProperty *property)
+{
+    if (!secure_dt_range(property, sizeof(*property))) return NULL;
+    size_t length;
+    if (os_add_overflow((size_t)property->length, (size_t)3, &length)) return NULL;
+    length &= ~(size_t)3;
+    if (length > SIZE_MAX - sizeof(*property) ||
+        !secure_dt_range(property, sizeof(*property) + length)) return NULL;
+    if (!secure_dt_find_zero(property->name, sizeof(property->name))) return NULL;
+    return (const DeviceTreeNodeProperty *)((uintptr_t)property + sizeof(*property) + length);
+}
+
+static const DeviceTreeNode *
+secure_dt_children(const DeviceTreeNode *node)
+{
+    if (!secure_dt_range(node, sizeof(*node))) return NULL;
+    const DeviceTreeNodeProperty *property = (const DeviceTreeNodeProperty *)(node + 1);
+    for (unsigned int i = 0; i < node->nProperties; i++) {
+        property = secure_dt_next_property(property);
+        if (!property) return NULL;
+    }
+    return (const DeviceTreeNode *)property;
+}
+
+static const DeviceTreeNode *
+secure_dt_skip(const DeviceTreeNode *node, unsigned int depth)
+{
+    if (depth >= 128) return NULL;
+    const DeviceTreeNode *cursor = secure_dt_children(node);
+    if (!cursor) return NULL;
+    for (unsigned int i = 0; i < node->nChildren; i++) {
+        cursor = secure_dt_skip(cursor, depth + 1);
+        if (!cursor) return NULL;
+    }
+    return cursor;
+}
+
+int
+SecureDTGetProperty(const DTEntry entry, const char *name,
+    const void **value, unsigned int *size)
+{
+    const DeviceTreeNode *node = (const DeviceTreeNode *)entry;
+    if (!name || !value || !size || !secure_dt_range(node, sizeof(*node))) return kError;
+    const DeviceTreeNodeProperty *property = (const DeviceTreeNodeProperty *)(node + 1);
+    for (unsigned int i = 0; i < node->nProperties; i++) {
+        const DeviceTreeNodeProperty *next = secure_dt_next_property(property);
+        if (!next) return kError;
+        if (strcmp(property->name, name) == 0) {
+            *value = property + 1;
+            *size = property->length;
+            return kSuccess;
+        }
+        property = next;
+    }
+    return kError;
+}
+
+int
+SecureDTLookupEntry(const DTEntry start, const char *path, DTEntry *found)
+{
+    const DeviceTreeNode *node = start ? (const DeviceTreeNode *)start :
+        (const DeviceTreeNode *)secure_dt_start;
+    if (!path || !found || !secure_dt_range(node, sizeof(*node))) return kError;
+    if (*path == '/') path++;
+    while (*path) {
+        const char *end = strchr(path, '/');
+        size_t length = end ? (size_t)(end - path) : strlen(path);
+        if (!length || length > kDTMaxEntryNameLength) return kError;
+        const DeviceTreeNode *child = secure_dt_children(node);
+        if (!child) return kError;
+        const DeviceTreeNode *match = NULL;
+        for (unsigned int i = 0; i < node->nChildren; i++) {
+            const void *name = NULL;
+            unsigned int size = 0;
+            if (SecureDTGetProperty((DTEntry)child, "name", &name, &size) != kSuccess)
+                return kError;
+            const char *zero = secure_dt_find_zero(name, size);
+            if (zero && (size_t)(zero - (const char *)name) == length &&
+                memcmp(name, path, length) == 0) {
+                match = child;
+                break;
+            }
+            child = secure_dt_skip(child, 0);
+            if (!child) return kError;
+        }
+        if (!match) return kError;
+        node = match;
+        path = end ? end + 1 : path + length;
+    }
+    *found = (DTEntry)node;
+    return kSuccess;
 }

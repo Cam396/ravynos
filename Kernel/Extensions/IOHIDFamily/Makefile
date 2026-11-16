@@ -9,6 +9,7 @@ KERNEL_PRIVATE = yes
 SRCS = \
         IOHIDSystem/IOHIDevice.cpp \
         IOHIDSystem/IOHIKeyboard.cpp \
+        IOHIDSystem/IOHIPointing.cpp \
         IOHIDSystem/IOHIKeyboardMapper.cpp \
         IOHIDSystem/IOBSDConsole.cpp \
         IOHIDSystem/IOFixed64.cpp \
@@ -20,11 +21,13 @@ SRCS = \
         IOHIDSystem/IOHIDWorkLoop.cpp \
         \
         IOHIDFamily/IOHIDEvent.cpp \
+        IOHIDFamily/IOHIDEventServiceQueue.cpp \
         IOHIDFamily/IOHIDFamilyPrivate.cpp \
         IOHIDFamily/IOHIDResource.cpp
 
 CSTD = none
 CXXSTD = none
+CXXFLAGS += -nostdinc++
 
 SLF = /System/Library/Frameworks
 CFLAGS = -Wno-implicit-int-conversion -Wno-sign-conversion \
@@ -32,6 +35,7 @@ CFLAGS = -Wno-implicit-int-conversion -Wno-sign-conversion \
 	-DAVAILABLE_MAC_OS_X_VERSION_10_13_AND_LATER="" -DPRIVATE \
         -DOMITPENDINGKEYCAPS \
 	-I${.CURDIR}/IOHIDSystem -I${.CURDIR} -I${.CURDIR}/IOHIDFamily \
+	-I${.CURDIR:H}/IOGraphics/IOGraphicsFamily \
 	-I${.CURDIR}/IOHIDSystem/IOKit/hidsystem \
         -I${RAVYN_SDKROOT}/usr/local/include/kernel \
 	-I${ROOT_BINARY_DIR}${ROOT_SOURCE_DIR}/Kernel/xnu/EXPORT_HDRS/iokit \
@@ -41,6 +45,11 @@ CFLAGS = -Wno-implicit-int-conversion -Wno-sign-conversion \
 	-I${ROOT_BINARY_DIR}${ROOT_SOURCE_DIR}/Kernel/xnu/EXPORT_HDRS/san \
 	-I${ROOT_BINARY_DIR}${ROOT_SOURCE_DIR}/Kernel/xnu/EXPORT_HDRS/security \
 	-I${ROOT_SOURCE_DIR}/Kernel/xnu/osfmk \
+	-I${ROOT_SOURCE_DIR}/Kernel/xnu/iokit \
+	-I${ROOT_SOURCE_DIR}/Kernel/xnu/libkern \
+	-I${ROOT_SOURCE_DIR}/Kernel/xnu/bsd \
+	-I${ROOT_SOURCE_DIR}/Kernel/xnu \
+	-include${ROOT_SOURCE_DIR}/Kernel/xnu/libkern/libkern/OSBase.h \
 	-include${RAVYN_SDKROOT}/usr/include/i386/endian.h \
 	-include${RAVYN_SDKROOT}/usr/local/include/kernel/os/object.h \
 	${CFLAGS.${.TARGET}}
@@ -54,7 +63,8 @@ CFLAGS.IOHIDDevice.o = -include${.CURDIR}/IOHIDFamily/IOHIDDevice.h
 all: copyheaders
 
 copyheaders:
-	cp -fv ${.CURDIR}/IOHIDFamily/IOHIDInterface.h \
+	mkdir -p ${RAVYN_SDKROOT}${SLF}/IOKit.framework/Headers/hid
+	cp -fv ${.CURDIR}/IOHIDFamily/IOHID*.h \
 	    ${RAVYN_SDKROOT}${SLF}/IOKit.framework/Headers/hid/
 	mkdir -p ${RAVYN_SDKROOT}${SLF}/IOKit.framework/Headers/usb
 	touch ${RAVYN_SDKROOT}${SLF}/IOKit.framework/Headers/usb/IOUSBHostFamily.h
@@ -69,3 +79,9 @@ SUBDIR = IOHIDSystem
 .include <rvn.kext.mk>
 
 
+
+# Generated/copied framework headers must exist before parallel compilation.
+${OBJS}: copyheaders
+
+# Recompile the native pointer adapter when its included implementation changes.
+IOHIDSystem/IOHIDSystem.o: ${.CURDIR}/IOHIDSystem/IOHIDLegacyPointer.inc

@@ -20,6 +20,11 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #ifndef _APPLEHIDUSAGETABLES_H
 #define _APPLEHIDUSAGETABLES_H
 
@@ -30,9 +35,10 @@
  * ****************************************************************************************** */
 
 
+#include "IOHIDUsageTables.h"
+
 /* Usage Pages */
 enum {
-    kHIDPage_AppleVendor                        = 0xFF00,
     kHIDPage_AppleVendorKeyboard                = 0xFF01,
     kHIDPage_AppleVendorMouse                   = 0xFF02,
     kHIDPage_AppleVendorAccelerometer           = 0xFF03,

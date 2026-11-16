@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 /* Copyright (c) 1995, 1997 Apple Computer, Inc. All Rights Reserved */
 /*-
  * Copyright (c) 1982, 1986, 1991, 1993
@@ -1498,6 +1503,8 @@ static int
 iopolicysys_vfs_materialize_dataless_files(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
 static int
 iopolicysys_vfs_statfs_no_data_volume(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
+static int
+iopolicysys_vfs_allow_lowspace_writes(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
 
 /*
  * iopolicysys
@@ -1555,7 +1562,20 @@ iopolicysys(struct proc *p, struct iopolicysys_args *uap, int32_t *retval)
 		if (error) {
 			goto out;
 		}
+		break;
+	case IOPOL_TYPE_VFS_ALLOW_LOW_SPACE_WRITES:
+		error = iopolicysys_vfs_allow_lowspace_writes(p, uap->cmd, iop_param.iop_scope, iop_param.iop_policy, &iop_param);
+		if (error) {
+			goto out;
+		}
+		printf("RAVYN-IOPOL-LOWSPACE pid=%d name=%s cmd=%d scope=%d policy=%d stored=%d\n",
+		    p->p_pid, p->p_comm, uap->cmd, iop_param.iop_scope,
+		    iop_param.iop_policy, proc_allow_low_space_writes(p));
+		break;
 	default:
+		printf("RAVYN-IOPOL-UNSUPPORTED pid=%d name=%s type=%d cmd=%d scope=%d policy=%d\n",
+		    p->p_pid, p->p_comm, iop_param.iop_iotype, uap->cmd,
+		    iop_param.iop_scope, iop_param.iop_policy);
 		error = EINVAL;
 		goto out;
 	}
@@ -2028,6 +2048,35 @@ iopolicysys_vfs_statfs_no_data_volume(struct proc *p __unused, int cmd,
 
 out:
 	return error;
+}
+
+/* XNU 8020 policy state, using Darwin 19's 16-bit atomic flag operations. */
+static int
+iopolicysys_vfs_allow_lowspace_writes(struct proc *p, int cmd, int scope,
+    int policy, struct _iopol_param_t *iop_param)
+{
+	if (scope != IOPOL_SCOPE_PROCESS) {
+		return EINVAL;
+	}
+	if (cmd == IOPOL_CMD_GET) {
+		iop_param->iop_policy = proc_allow_low_space_writes(p) ?
+		    IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_ON : IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_OFF;
+		return 0;
+	}
+	if (cmd != IOPOL_CMD_SET ||
+	    (policy != IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_OFF &&
+	    policy != IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_ON)) {
+		return EINVAL;
+	}
+	if (!IOTaskHasEntitlement(current_task(), "com.apple.private.vfs.allow-low-space-writes")) {
+		return EPERM;
+	}
+	if (policy == IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_ON) {
+		OSBitOrAtomic16(P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES, &p->p_vfs_iopolicy);
+	} else {
+		OSBitAndAtomic16((uint32_t)~P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES, &p->p_vfs_iopolicy);
+	}
+	return 0;
 }
 
 /* BSD call back function for task_policy networking changes */

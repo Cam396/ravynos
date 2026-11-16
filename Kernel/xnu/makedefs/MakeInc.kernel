@@ -1,3 +1,5 @@
+CLANG_PROFILE_RUNTIME ?= -L$(OBJROOT)/../../Libraries/llvm_target/compiler-rt/lib/ravynos -lclang_rt.profile_osx
+
 # -*- mode: makefile;-*-
 #
 # Copyright (C) 1999-2016 Apple Inc. All rights reserved.
@@ -7,6 +9,7 @@
 # to assembling and linking a kernel.
 #
 
+# NOTICE: Modified for ravynOS macOS bring-up (2026-10-18 to 2026-11-15) under APSL-2.0 clause 2.2(b).
 #
 # Validate configuration options
 #
@@ -141,7 +144,7 @@ ifeq ($(PRE_LTO),1)
 else
 	$(call makelog,$(ColorL)LD$(Color0)  $(ColorLF)$(@F)$(Color0))
 	$(_v)$(CAT) $(filter %.filelist,$+) < /dev/null > link.filelist
-	$(_v)$(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_EXPORTS) -filelist link.filelist version.o $(filter %.o,$+) -o $@ $(LD_KERNEL_LIBS) $(LD_KERNEL_ARCHIVES) -L$(OBJROOT)/../../Libraries/llvm_target/compiler-rt/lib/ravynos -lclang_rt.profile_osx
+	$(_v)$(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_EXPORTS) -filelist link.filelist version.o $(filter %.o,$+) -o $@ $(LD_KERNEL_LIBS) $(LD_KERNEL_ARCHIVES) $(CLANG_PROFILE_RUNTIME)
 endif
 
 

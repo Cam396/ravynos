@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <libkern/c++/OSUnserialize.h>
 #include <libkern/c++/OSKext.h>
@@ -122,6 +127,10 @@ iokit_post_constructor_init(void)
  */
 void (*record_startup_extensions_function)(void) = NULL;
 
+#if defined(RAVYN_ARM64_STATIC_IOSTORAGE)
+extern "C" void ravyn_recovery_storage_bsd_init(void);
+#endif
+
 void
 StartIOKit( void * p1, void * p2, void * p3, void * p4 )
 {
@@ -164,6 +173,9 @@ StartIOKit( void * p1, void * p2, void * p3, void * p4 )
 	OSlibkernInit();
 	IOMachPortInitialize();
 	devsw_init();
+#if defined(RAVYN_ARM64_STATIC_IOSTORAGE)
+	ravyn_recovery_storage_bsd_init();
+#endif
 
 	gIOProgressBackbufferKey  = OSSymbol::withCStringNoCopy(kIOProgressBackbufferKey);
 	gIORemoveOnReadProperties = OSSet::withObjects((const OSObject **) &gIOProgressBackbufferKey, 1);

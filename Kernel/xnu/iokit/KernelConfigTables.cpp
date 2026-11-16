@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * NOTICE: This file was modified by SPARTA, Inc. in 2005 to introduce
  * support for mandatory and extensible security protections.  This notice
  * is included in support of clause 2.2 (b) of the Apple Public License,
@@ -34,6 +39,20 @@
 
 const char * gIOKernelConfigTables =
     "("
+#if defined(__arm64__) && defined(ARM64_BOARD_CONFIG_BCM2837)
+    "   {"
+    "     'IOClass'         = RavynBCMPlatform;"
+    "     'IOProviderClass' = IOPlatformExpertDevice;"
+    "     'IONameMatch'     = (bcm2837, 'ravyn,pi5-core');"
+    "     'IOProbeScore'    = 10000:32;"
+    "   },"
+    "   {"
+    "     'IOClass' = 'com_apple_filesystems_hfs';"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = 'com_apple_filesystems_hfs';"
+    "     'IOResourceMatch' = IOBSD;"
+    "   },"
+#endif
     "   {"
     "     'IOClass'         = IOPanicPlatform;"
     "     'IOProviderClass' = IOPlatformExpertDevice;"

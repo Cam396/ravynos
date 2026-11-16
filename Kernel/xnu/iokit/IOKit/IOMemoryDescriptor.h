@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #ifndef _IOMEMORYDESCRIPTOR_H
 #define _IOMEMORYDESCRIPTOR_H
 
@@ -408,6 +413,10 @@ public:
 
 	virtual uint64_t getPreparationID( void );
 	void             setPreparationID( void );
+	uint64_t getDescriptorID(void);
+	void setDescriptorID(void);
+	uint64_t getDMAMapLength(uint64_t *offset);
+	IOReturn ktraceEmitPhysicalSegments(void);
 
 	void     setVMTags(uint32_t kernelTag, uint32_t userTag);
 	uint32_t getVMTag(vm_map_t map);
@@ -1089,6 +1098,7 @@ public:
 		task_t newOwner,
 		int newLedgerTag,
 		IOOptionBits newLedgerOptions);
+	static uint64_t memoryReferenceGetDMAMapLength(IOMemoryReference *, uint64_t *);
 	static IOReturn memoryReferenceGetPageCounts(
 		IOMemoryReference * ref,
 		IOByteCount       * residentPageCount,

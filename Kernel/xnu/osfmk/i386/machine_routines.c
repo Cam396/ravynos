@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <i386/machine_routines.h>
 #include <i386/io_map_entries.h>
@@ -552,14 +557,32 @@ ml_processor_register(
 {
 	static boolean_t done_topo_sort = FALSE;
 	static uint32_t num_registered = 0;
+	static kern_return_t registration_error = KERN_SUCCESS;
 
-	/* Register all CPUs first, and track max */
+	/* The LAPIC map is fixed-size, even when MADT supplies x2APIC IDs.
+	 * Reject unsupported IDs before register_cpu() can index that map. */
+	if (processor_out == NULL || lapic_id >= MAX_LAPICIDS) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	/* register_cpu() cannot roll back every reserved CPU/topology resource.
+	 * Once it fails, neither a retry nor topology startup is safe this boot. */
+	if (registration_error != KERN_SUCCESS) {
+		return registration_error;
+	}
+
+	/* Register all CPUs first, and track only successful registrations. */
 	if (start == FALSE) {
-		num_registered++;
-
+		if (num_registered >= MAX_CPUS) {
+			return KERN_RESOURCE_SHORTAGE;
+		}
 		DBG( "registering CPU lapic id %d\n", lapic_id );
-
-		return register_cpu( lapic_id, processor_out, boot_cpu );
+		kern_return_t result = register_cpu(lapic_id, processor_out, boot_cpu);
+		if (result == KERN_SUCCESS) {
+			num_registered++;
+		} else {
+			registration_error = result;
+		}
+		return result;
 	}
 
 	/* Sort by topology before we start anything */

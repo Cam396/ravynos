@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * Mach Operating System
  * Copyright (c) 1987 Carnegie-Mellon University
  * All rights reserved.  The CMU software License Agreement specifies
@@ -42,6 +47,9 @@
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/debug.h>
+
+/* Retain focused syscall 536 diagnostics in the panic buffer as well. */
+extern int paniclog_append_noflush(const char *, ...);
 #include <kern/extmod_statistics.h>
 #include <mach/mach_traps.h>
 #include <mach/port.h>
@@ -53,6 +61,7 @@
 #include <mach/vm_map.h>
 #include <mach/vm_param.h>
 #include <mach/vm_prot.h>
+#include "shared_region_prot.h"
 
 #include <sys/file_internal.h>
 #include <sys/param.h>
@@ -68,6 +77,7 @@
 #include <sys/trace.h>
 #include <sys/kernel.h>
 #include <sys/ubc_internal.h>
+#include <sys/random.h>
 #include <sys/user.h>
 #include <sys/syslog.h>
 #include <sys/stat.h>
@@ -327,6 +337,9 @@ int shared_region_unnest_log_count_threshold = 5;
 /*
  * Shared cache path enforcement.
  */
+
+/* Darwin 19's legacy dyld path remains enforced by the legacy syscall. */
+static char scdir_path_monterey[] = "/System/Library/dyld/";
 
 #ifndef CONFIG_EMBEDDED
 static int scdir_enforce = 1;
@@ -676,7 +689,8 @@ pid_for_task(
 	AUDIT_MACH_SYSCALL_ENTER(AUE_PIDFORTASK);
 	AUDIT_ARG(mach_port1, t);
 
-	t1 = port_name_to_task_inspect(t);
+	/* PID identity requires NAME capability, not INSPECT. */
+	t1 = port_name_to_task_name(t);
 
 	if (t1 == TASK_NULL) {
 		err = KERN_FAILURE;
@@ -949,6 +963,67 @@ tfpout:
 	}
 	AUDIT_MACH_SYSCALL_EXIT(error);
 	return error;
+}
+
+/*
+ * Monterey syscall 539. The READ capability is genuine; the initial supported
+ * methods are task_info and audited VM reads/queries. Other methods reject it.
+ * Preserve the Catalina binary MAC policy ABI: use the existing stronger
+ * get-task hook conservatively, rather than modifying registered policy layout.
+ */
+int
+task_read_for_pid(struct proc *caller __unused,
+    struct task_read_for_pid_args *args, int *ret)
+{
+    task_t anchor = TASK_NULL;
+    task_read_t task = TASK_READ_NULL;
+    proc_t target = PROC_NULL;
+    ipc_port_t access = IPC_PORT_NULL;
+    mach_port_name_t name = MACH_PORT_NULL;
+    boolean_t self = FALSE;
+    int error = 0;
+
+    if (args->pid == 0) { error = EPERM; goto out; }
+    anchor = port_name_to_task(args->target_tport);
+    if (anchor == TASK_NULL) { error = EINVAL; goto out; }
+    target = proc_find(args->pid);
+    if (target == PROC_NULL) { error = ESRCH; goto out; }
+    self = target == current_proc();
+    if (!task_for_pid_posix_check(target)) { error = EPERM; goto out; }
+    if (target->task == TASK_NULL) { goto out; }
+#if CONFIG_MACF
+    /* Conservative: a READ-only grant denied by the old CONTROL hook stays denied. */
+    if (mac_proc_check_get_task_v80(kauth_cred_get(), target, TASK_FLAVOR_READ)) {
+        error = EPERM; goto out;
+    }
+#endif
+    task = target->task;
+    task_reference(task);
+    proc_rele(target);
+    target = PROC_NULL;
+    if (!kauth_cred_issuser(kauth_cred_get()) && !self &&
+        task_get_task_access_port(task, &access) == 0 && access != IPC_PORT_NULL) {
+        if (access == IPC_PORT_DEAD) { error = EACCES; goto out; }
+        error = check_task_access_with_flavor(access, proc_selfpid(),
+            kauth_getgid(), args->pid, TASK_FLAVOR_READ);
+        if (error != MACH_MSG_SUCCESS) {
+            error = error == MACH_RCV_INTERRUPTED ? EINTR : EPERM;
+            goto out;
+        }
+    }
+    if (is_corpsetask(task)) { error = EACCES; goto out; }
+    name = ipc_port_copyout_send(convert_task_read_to_port(task),
+        get_task_ipcspace(current_task()));
+    task = TASK_READ_NULL; /* conversion consumed the reference */
+out:
+    if (target != PROC_NULL) { proc_rele(target); }
+    if (access != IPC_PORT_NULL && access != IPC_PORT_DEAD) { ipc_port_release_send(access); }
+    if (task != TASK_READ_NULL) { task_deallocate(task); }
+    if (anchor != TASK_NULL) { task_deallocate(anchor); }
+    /* Match the reference syscall's output/error convention, including copyout. */
+    (void)copyout((char *)&name, args->t, sizeof(name));
+    *ret = error;
+    return error;
 }
 
 /*
@@ -2165,6 +2240,379 @@ shared_region_map_and_slide_np(
 
 done:
 	return kr;
+}
+
+#define SR2_MAX_FILES       256
+#define SR2_MAX_MAPPINGS    (SR2_MAX_FILES * 8)
+#define SR2_SLIDE_MASK      (~PAGE_MASK)
+
+struct shared_region_map_file_state {
+	struct fileproc *fp;
+	struct vnode *vp;
+};
+
+int
+shared_region_map_and_slide_2_np(
+	struct proc *p,
+	struct shared_region_map_and_slide_2_np_args *uap,
+	__unused int *retvalp)
+{
+	struct shared_file_np *shared_files = NULL;
+	struct shared_file_mapping_slide_np *mappings = NULL;
+	struct vm_shared_region_file_mappings *vm_files = NULL;
+	struct shared_region_map_file_state *file_state = NULL;
+	struct vm_shared_region *shared_region = NULL;
+	struct vnode *scdir_vp = NULL;
+	struct vnode *root_vp = NULL;
+	struct vnode_attr va;
+	uint32_t files_count = uap->files_count;
+	uint32_t mappings_count = uap->mappings_count;
+	uint32_t mappings_next = 0;
+	uint32_t random_value = 0;
+	uint32_t slide_amount = 0;
+	unsigned int i, j;
+	int error = 0;
+	kern_return_t kr = KERN_SUCCESS;
+	boolean_t mappings_installed = FALSE;
+	boolean_t inputs_copied = FALSE;
+	boolean_t is_chrooted = FALSE;
+	void *root_dir = NULL;
+	const char *trace_stage = "entry";
+	unsigned int trace_file = 0;
+	int trace_fd = -1;
+
+	SHARED_REGION_TRACE_INFO(("shared_region: syscall536 pid=%d files=%u mappings=%u enter\n",
+	    p->p_pid, files_count, mappings_count));
+	if (shared_region_trace_level >= SHARED_REGION_TRACE_INFO_LVL) {
+		paniclog_append_noflush("shared_region: syscall536 pid=%d files=%u mappings=%u enter\n",
+		    p->p_pid, files_count, mappings_count);
+	}
+
+	if (files_count == 0 || mappings_count == 0) {
+		return 0;
+	}
+	if (files_count > SR2_MAX_FILES || mappings_count > SR2_MAX_MAPPINGS) {
+		return E2BIG;
+	}
+
+	trace_stage = "allocation";
+	shared_files = (struct shared_file_np *)kalloc(files_count * sizeof(*shared_files));
+	mappings = (struct shared_file_mapping_slide_np *)kalloc(mappings_count * sizeof(*mappings));
+	vm_files = (struct vm_shared_region_file_mappings *)kalloc(files_count * sizeof(*vm_files));
+	file_state = (struct shared_region_map_file_state *)kalloc(files_count * sizeof(*file_state));
+	if (vm_files != NULL) {
+		bzero(vm_files, files_count * sizeof(*vm_files));
+	}
+	if (file_state != NULL) {
+		bzero(file_state, files_count * sizeof(*file_state));
+	}
+	if (shared_files == NULL || mappings == NULL || vm_files == NULL || file_state == NULL) {
+		error = ENOMEM;
+		goto done;
+	}
+
+	trace_stage = "copyin";
+	if (copyin((user_addr_t)uap->files, shared_files,
+	    files_count * sizeof(*shared_files)) != 0 ||
+	    copyin((user_addr_t)uap->mappings, mappings,
+	    mappings_count * sizeof(*mappings)) != 0) {
+		error = EFAULT;
+		goto done;
+	}
+
+	inputs_copied = TRUE;
+
+	trace_stage = "mapping partition";
+	/* Every file contributes a contiguous range; require an exact partition. */
+	for (i = 0; i < files_count; i++) {
+		if (shared_files[i].sf_mappings_count > mappings_count - mappings_next) {
+			error = EINVAL;
+			goto done;
+		}
+		vm_files[i].mappings_count = shared_files[i].sf_mappings_count;
+		vm_files[i].mappings = &mappings[mappings_next];
+		mappings_next += shared_files[i].sf_mappings_count;
+	}
+	if (mappings_next != mappings_count) {
+		error = EINVAL;
+		goto done;
+	}
+
+	trace_stage = "slide fixup";
+	/* dyld supplies the maximum slide in the first file record. */
+	if (shared_files[0].sf_slide != 0) {
+		read_random(&random_value, sizeof(random_value));
+		slide_amount = (random_value % shared_files[0].sf_slide) & SR2_SLIDE_MASK;
+	}
+#if DEVELOPMENT || DEBUG
+	extern bool bootarg_disable_aslr;
+	if (bootarg_disable_aslr) {
+		slide_amount = 0;
+	}
+#endif /* DEVELOPMENT || DEBUG */
+
+	for (i = 0; i < files_count; i++) {
+		shared_files[i].sf_slide = slide_amount;
+		vm_files[i].slide = slide_amount;
+		for (j = 0; j < vm_files[i].mappings_count; j++) {
+			struct shared_file_mapping_slide_np *mapping = &vm_files[i].mappings[j];
+			mach_vm_address_t slid_address;
+			user_addr_t slid_info_address;
+			if (os_add_overflow(mapping->sms_address, slide_amount, &slid_address)) {
+				error = EINVAL;
+				goto done;
+			}
+			mapping->sms_address = slid_address;
+			if (mapping->sms_slide_size != 0) {
+				if (os_add_overflow(mapping->sms_slide_start, slide_amount, &slid_info_address)) {
+					error = EINVAL;
+					goto done;
+				}
+				mapping->sms_slide_start = slid_info_address;
+			}
+		}
+	}
+
+	trace_stage = "process root";
+	/* Hold the process root vnode stable while enforcing root-volume policy. */
+	proc_fdlock(p);
+	root_dir = (void *)p->p_fd->fd_rdir;
+	root_vp = p->p_fd->fd_rdir;
+	if (root_vp == NULL) {
+		root_vp = rootvnode;
+	}
+	if (root_vp != NULL) {
+		vnode_get(root_vp);
+	}
+	is_chrooted = (p->p_fd->fd_rdir != NULL);
+	proc_fdunlock(p);
+	if (root_vp == NULL) {
+		error = EINVAL;
+		goto done;
+	}
+	if (is_chrooted) {
+		error = EPERM;
+		goto done;
+	}
+
+	if (scdir_enforce) {
+		/* Monterey dyld 960 uses XNU 8020's /System/Library/dyld/ path. */
+		trace_stage = "Monterey cache directory lookup";
+		error = vnode_lookup(scdir_path_monterey, 0, &scdir_vp, vfs_context_current());
+		if (shared_region_trace_level >= SHARED_REGION_TRACE_INFO_LVL) {
+			paniclog_append_noflush("shared_region: syscall536 cache_dir=%s enforced=%d lookup_errno=%d\n",
+			    scdir_path_monterey, scdir_enforce, error);
+		}
+		if (error != 0) {
+			goto done;
+		}
+	}
+
+	trace_stage = "shared region lookup";
+	shared_region = vm_shared_region_trim_and_get(current_task());
+	if (shared_region == NULL) {
+		error = EINVAL;
+		goto done;
+	}
+
+	for (i = 0; i < files_count; i++) {
+		struct fileproc *fp = NULL;
+		struct vnode *vp;
+		off_t file_size;
+		vm_prot_t maxprot = VM_PROT_ALL;
+		if (vm_files[i].mappings_count == 0) {
+			continue;
+		}
+
+		trace_file = i;
+		trace_fd = shared_files[i].sf_fd;
+		trace_stage = "file descriptor lookup";
+		error = fp_lookup(p, shared_files[i].sf_fd, &fp, 0);
+		if (error != 0) {
+			goto done;
+		}
+		file_state[i].fp = fp;
+		trace_stage = "file type/permissions";
+		if (FILEGLOB_DTYPE(fp->f_fglob) != DTYPE_VNODE || !(fp->f_fglob->fg_flag & FREAD)) {
+			error = EPERM;
+			goto done;
+		}
+		trace_stage = "vnode_getwithref";
+		error = vnode_getwithref((vnode_t)fp->f_fglob->fg_data);
+		if (error != 0) {
+			goto done;
+		}
+		vp = (struct vnode *)fp->f_fglob->fg_data;
+		file_state[i].vp = vp;
+		if (vp->v_type != VREG) {
+			error = EINVAL;
+			goto done;
+		}
+#if CONFIG_MACF
+		trace_stage = "mac_file_check_mmap";
+		error = mac_file_check_mmap(vfs_context_ucred(vfs_context_current()),
+		    fp->f_fglob, VM_PROT_ALL, MAP_FILE, 0, &maxprot);
+		if (error != 0) {
+			goto done;
+		}
+#endif /* CONFIG_MACF */
+
+		trace_stage = "vnode_getattr";
+		VATTR_INIT(&va);
+		VATTR_WANTED(&va, va_uid);
+		VATTR_WANTED(&va, va_flags);
+		error = vnode_getattr(vp, &va, vfs_context_current());
+		if (error != 0) {
+			goto done;
+		}
+		if (va.va_uid != 0) {
+			error = EPERM;
+			goto done;
+		}
+#if CONFIG_CSR
+		if (csr_check(CSR_ALLOW_UNRESTRICTED_FS) != 0 && !(va.va_flags & SF_RESTRICTED)) {
+			error = EPERM;
+			goto done;
+		}
+#else
+		if (vp->v_mount != root_vp->v_mount) {
+			error = EPERM;
+			goto done;
+		}
+#endif /* CONFIG_CSR */
+		trace_stage = "cache directory parent";
+		if (scdir_enforce && vnode_parent(vp) != scdir_vp) {
+			error = EPERM;
+			goto done;
+		}
+		trace_stage = "vnode_size";
+		error = vnode_size(vp, &file_size, vfs_context_current());
+		if (error != 0 || file_size < 0) {
+			if (error == 0) {
+				error = EINVAL;
+			}
+			goto done;
+		}
+		vm_files[i].file_size = (memory_object_size_t)file_size;
+		trace_stage = "ubc_getobject";
+		vm_files[i].file_control = ubc_getobject(vp, UBC_HOLDOBJECT);
+		if (vm_files[i].file_control == MEMORY_OBJECT_CONTROL_NULL) {
+			error = EINVAL;
+			goto done;
+		}
+
+		for (j = 0; j < vm_files[i].mappings_count; j++) {
+			struct shared_file_mapping_slide_np *mapping = &vm_files[i].mappings[j];
+			mach_vm_offset_t file_end;
+			trace_stage = "mapping validation";
+			if (mapping->sms_size == 0) {
+				error = EINVAL;
+				goto done;
+			}
+			error = shared_region_validate_mapping_protections(
+			    mapping->sms_init_prot, mapping->sms_max_prot, maxprot);
+			if (error != 0) {
+				goto done;
+			}
+			if (!(mapping->sms_init_prot & VM_PROT_ZF)) {
+				if (os_add_overflow(mapping->sms_file_offset, mapping->sms_size, &file_end) ||
+				    file_end > vm_files[i].file_size) {
+					error = EINVAL;
+					goto done;
+				}
+				if (cs_system_enforcement() &&
+				    !ubc_cs_is_range_codesigned(vp, mapping->sms_file_offset, mapping->sms_size)) {
+					error = EINVAL;
+					goto done;
+				}
+			}
+		}
+	}
+
+	trace_stage = "map batch";
+	trace_file = 0;
+	trace_fd = -1;
+	kr = vm_shared_region_map_file_batch(shared_region, files_count, vm_files,
+	    root_dir);
+	if (kr == KERN_SUCCESS) {
+		mappings_installed = TRUE;
+	} else {
+		switch (kr) {
+		case KERN_INVALID_ADDRESS:
+			error = EFAULT;
+			break;
+		case KERN_PROTECTION_FAILURE:
+			error = EPERM;
+			break;
+		case KERN_NO_SPACE:
+		case KERN_RESOURCE_SHORTAGE:
+			error = ENOMEM;
+			break;
+		default:
+			error = EINVAL;
+			break;
+		}
+	}
+	if (mappings_installed && (p->p_flag & P_NOSHLIB)) {
+		OSBitAndAtomic(~((uint32_t)P_NOSHLIB), &p->p_flag);
+	}
+
+done:
+	SHARED_REGION_TRACE_INFO(("shared_region: syscall536 pid=%d files=%u mappings=%u first=0x%llx slide=0x%x chroot=%d errno=%d kr=%d installed=%d stage=%s file=%u fd=%d\n",
+	    p->p_pid, files_count, mappings_count,
+	    (unsigned long long)(inputs_copied ? mappings[0].sms_address : 0),
+	    slide_amount, is_chrooted, error, kr, mappings_installed,
+	    trace_stage, trace_file, trace_fd));
+	if (shared_region_trace_level >= SHARED_REGION_TRACE_INFO_LVL) {
+		paniclog_append_noflush("shared_region: syscall536 pid=%d files=%u mappings=%u first=0x%llx slide=0x%x chroot=%d errno=%d kr=%d installed=%d stage=%s file=%u fd=%d\n",
+		    p->p_pid, files_count, mappings_count,
+		    (unsigned long long)(inputs_copied ? mappings[0].sms_address : 0),
+		    slide_amount, is_chrooted, error, kr, mappings_installed,
+		    trace_stage, trace_file, trace_fd);
+	}
+	if (file_state != NULL) {
+		for (i = 0; i < files_count; i++) {
+			if (file_state[i].vp != NULL) {
+				if (mappings_installed) {
+					vnode_lock_spin(file_state[i].vp);
+					file_state[i].vp->v_flag |= VSHARED_DYLD;
+					vnode_unlock(file_state[i].vp);
+					if (!(vnode_vfsvisflags(file_state[i].vp) & MNT_NOATIME)) {
+						VATTR_INIT(&va);
+						nanotime(&va.va_access_time);
+						VATTR_SET_ACTIVE(&va, va_access_time);
+						vnode_setattr(file_state[i].vp, &va, vfs_context_current());
+					}
+				}
+				(void)vnode_put(file_state[i].vp);
+			}
+			if (file_state[i].fp != NULL) {
+				fp_drop(p, shared_files[i].sf_fd, file_state[i].fp, 0);
+			}
+		}
+	}
+	if (scdir_vp != NULL) {
+		(void)vnode_put(scdir_vp);
+	}
+	if (root_vp != NULL) {
+		(void)vnode_put(root_vp);
+	}
+	if (shared_region != NULL) {
+		vm_shared_region_deallocate(shared_region);
+	}
+	if (file_state != NULL) {
+		kfree(file_state, files_count * sizeof(*file_state));
+	}
+	if (vm_files != NULL) {
+		kfree(vm_files, files_count * sizeof(*vm_files));
+	}
+	if (mappings != NULL) {
+		kfree(mappings, mappings_count * sizeof(*mappings));
+	}
+	if (shared_files != NULL) {
+		kfree(shared_files, files_count * sizeof(*shared_files));
+	}
+	return error;
 }
 
 /* sysctl overflow room */

@@ -884,6 +884,11 @@ RavynAHCIPort::identifyDevice(PortState &portState, uint16_t *identifyWords512)
         // Not fatal on all HBAs; some devices are already link-up and ready.
         AHCI_Log("warning: port %u reset did not complete, continuing", portState.port);
 
+    // COMRESET may clear PxCMD.ST (observed on VMware's AHCI controller).
+    // Restart the engine after link reset before submitting IDENTIFY.
+    if (!startPortEngine(portState.port))
+        return false;
+
     if (!waitWhileBusy(portState.port, 1000))
         return false;
 

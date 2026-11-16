@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 /*
@@ -221,6 +226,7 @@ struct task {
 	struct ipc_port *itk_resume;    /* a receive right to resume this task */
 	struct ipc_port *itk_registered[TASK_PORT_REGISTER_MAX];
 	/* all send rights */
+	struct ipc_port **itk_dyld_notify; /* lazy array of dyld process-info send rights */
 
 	struct ipc_space *itk_space;
 
@@ -272,6 +278,7 @@ struct task {
 #define TF_DARKWAKE_MODE        0x00001000                              /* task is in darkwake mode */
 #define TF_NO_SMT               0x00002000                              /* task threads must not be paired with SMT threads */
 #define TF_PAC_EXC_FATAL        0x00004000                              /* task is marked a corpse if a PAC exception occurs */
+#define TF_FILTER_MSG           0x00008000                              /* task uses Mach message filtering */
 
 /*
  * Task is running within a 64-bit address space.
@@ -467,6 +474,13 @@ struct task {
 	mach_vm_address_t mach_header_vm_address;
 
 	uint32_t loadTag; /* dext ID used for logging identity */
+
+	/* Append compatibility state: preserve every established task field offset. */
+	struct ipc_port *itk_read;      /* task-owned READ receive right; no task ref */
+#if CONFIG_MACF
+	uint8_t *ravyn_mach_trap_filter_mask;
+	uint8_t *ravyn_mach_kobj_filter_mask;
+#endif
 };
 
 /*
@@ -767,6 +781,10 @@ extern bool     task_set_ca_client_wi(
 	task_t task,
 	boolean_t ca_client_wi);
 
+extern void             task_dyld_process_info_update_helper(
+	task_t task, size_t active_count, vm_map_address_t magic_addr,
+	ipc_port_t *release_ports, size_t release_count);
+
 extern void             task_set_dyld_info(
 	task_t          task,
 	mach_vm_address_t addr,
@@ -955,6 +973,8 @@ extern boolean_t task_has_assertions(task_t task);
 
 extern void      task_set_gpu_denied(task_t task, boolean_t denied);
 extern boolean_t task_is_gpu_denied(task_t task);
+extern void task_set_filter_msg_flag(task_t task, boolean_t flag);
+extern boolean_t task_get_filter_msg_flag(task_t task);
 
 extern queue_head_t * task_io_user_clients(task_t task);
 extern void     task_set_message_app_suspended(task_t task, boolean_t enable);
@@ -985,6 +1005,7 @@ extern boolean_t get_task_frozen(task_t);
 /* Convert from a task to a port */
 extern ipc_port_t convert_task_to_port(task_t);
 extern ipc_port_t convert_task_name_to_port(task_name_t);
+extern ipc_port_t convert_task_read_to_port(task_read_t);
 extern ipc_port_t convert_task_inspect_to_port(task_inspect_t);
 extern ipc_port_t convert_task_suspension_token_to_port(task_suspension_token_t task);
 
@@ -1041,6 +1062,7 @@ extern void             task_deallocate(
 extern void             task_name_deallocate(
 	task_name_t             task_name);
 
+extern void             task_read_deallocate(task_read_t task_read);
 extern void             task_inspect_deallocate(
 	task_inspect_t          task_inspect);
 

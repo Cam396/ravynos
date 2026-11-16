@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -145,6 +150,7 @@
 #include <kern/counters.h>
 #include <kern/work_interval.h>
 #include <kern/suid_cred.h>
+#include <kern/task_ident.h>
 
 #include <vm/vm_protos.h>
 
@@ -167,6 +173,7 @@ typedef struct {
 	mach_msg_id_t num;
 	mig_routine_t routine;
 	int size;
+	int kobjidx;
 #if     MACH_COUNTERS
 	mach_counter_t callcount;
 #endif
@@ -181,6 +188,7 @@ typedef struct {
 
 static mig_hash_t mig_buckets[MAX_MIG_ENTRIES];
 static int mig_table_max_displ;
+int mach_kobj_count;
 static mach_msg_size_t mig_reply_size = sizeof(mig_reply_error_t);
 
 static zone_t ipc_kobject_label_zone;
@@ -230,6 +238,7 @@ mig_init(void)
 	unsigned int i, n = sizeof(mig_e) / sizeof(const struct mig_subsystem *);
 	int howmany;
 	mach_msg_id_t j, pos, nentry, range;
+	for (i = 0; i < MAX_MIG_ENTRIES; i++) mig_buckets[i].kobjidx = -1;
 
 	for (i = 0; i < n; i++) {
 		range = mig_e[i]->end - mig_e[i]->start;
@@ -253,6 +262,7 @@ mig_init(void)
 					}
 				}
 
+				mach_kobj_count++;
 				mig_buckets[pos].num = nentry;
 				mig_buckets[pos].routine = mig_e[i]->routine[j].stub_routine;
 				if (mig_e[i]->routine[j].max_reply_msg) {
@@ -265,7 +275,8 @@ mig_init(void)
 			}
 		}
 	}
-	printf("mig_table_max_displ = %d\n", mig_table_max_displ);
+	mach_kobj_count += 32; /* pinned reference extension reserve */
+	printf("mig_table_max_displ = %d mach_kobj_count = %d\n", mig_table_max_displ, mach_kobj_count);
 }
 
 /*
@@ -273,6 +284,22 @@ mig_init(void)
  *	Purpose:
  *		Deliver notifications to kobjects that care about them.
  */
+
+kern_return_t
+ipc_kobject_set_kobjidx(int message_id, int index)
+{
+    if (index < 0 || index >= mach_kobj_count) return KERN_INVALID_ARGUMENT;
+    unsigned int position = (unsigned int)MIG_HASH(message_id);
+    int remaining = mig_table_max_displ;
+    mig_hash_t *entry;
+    do {
+        entry = &mig_buckets[position++ % MAX_MIG_ENTRIES];
+    } while (message_id != entry->num && entry->num && --remaining);
+    if (!entry->routine || message_id != entry->num) return KERN_INVALID_ARGUMENT;
+    os_atomic_store(&entry->kobjidx, index, release);
+    return KERN_SUCCESS;
+}
+
 void
 ipc_kobject_init(void)
 {
@@ -405,7 +432,16 @@ ipc_kobject_server(
 				task = convert_port_to_task_with_exec_token(port, &exec_token);
 			}
 
-			(*ptr->routine)(request->ikm_header, reply->ikm_header);
+#if CONFIG_MACF
+            int filter_error = mac_task_check_kobj_filter(current_task(),
+                current_proc(), request_msgh_id, os_atomic_load(&ptr->kobjidx, acquire));
+            if (filter_error != KERN_SUCCESS) {
+                ((mig_reply_error_t *)reply->ikm_header)->RetCode = filter_error;
+            } else
+#endif
+            {
+                (*ptr->routine)(request->ikm_header, reply->ikm_header);
+            }
 
 			/* Check if the exec token changed during the mig routine */
 			if (task != TASK_NULL) {
@@ -1034,6 +1070,10 @@ ipc_kobject_notify(
 
 		case IKOT_WORK_INTERVAL:
 			work_interval_port_notify(request_header);
+			return TRUE;
+
+		case IKOT_TASK_ID_TOKEN:
+			task_id_token_notify(request_header);
 			return TRUE;
 
 		case IKOT_SUID_CRED:

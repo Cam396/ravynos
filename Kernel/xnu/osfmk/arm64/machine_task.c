@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_COPYRIGHT@
  */
 /*
@@ -250,4 +255,205 @@ machine_task_init(__unused task_t new_task,
     __unused task_t parent_task,
     __unused boolean_t memory_inherit)
 {
+#if defined(ARM64_BOARD_CONFIG_BCM2837)
+    extern void ravyn_user_pauth_exec(task_t);
+    if (memory_inherit && parent_task != TASK_NULL)
+        memcpy(new_task->ravyn_user_pauth_keys, parent_task->ravyn_user_pauth_keys,
+            sizeof(new_task->ravyn_user_pauth_keys));
+    else
+        ravyn_user_pauth_exec(new_task);
+#endif
 }
+
+#if defined(ARM64_BOARD_CONFIG_BCM2837)
+#include <pexpert/pexpert.h>
+extern void read_random(void *, unsigned int);
+
+boolean_t
+ravyn_arm64e_reference_enabled(void)
+{
+    int optin = 0;
+    uint64_t isar1;
+    if (!PE_parse_boot_argn("ravyn_arm64e", &optin, sizeof(optin)) || optin != 1)
+        return FALSE;
+    __asm__ volatile("mrs %0, ID_AA64ISAR1_EL1" : "=r"(isar1));
+    return (isar1 & 0xff0) != 0 && (isar1 & 0xff000000) != 0;
+}
+
+/* arm64e uses process-independent IA/DA keys for shared-cache pointers.
+ * IB/DB/GA remain task-owned and are inherited across fork, renewed on exec. */
+static uint64_t ravyn_shared_pauth_keys[4];
+static int ravyn_shared_pauth_ready;
+static void ravyn_shared_pauth_initialize(void)
+{
+    int expected=0;
+    if (__atomic_compare_exchange_n(&ravyn_shared_pauth_ready,&expected,1,FALSE,
+            __ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
+        read_random(ravyn_shared_pauth_keys,sizeof(ravyn_shared_pauth_keys));
+        __atomic_store_n(&ravyn_shared_pauth_ready,2,__ATOMIC_RELEASE);
+    } else {
+        while (__atomic_load_n(&ravyn_shared_pauth_ready,__ATOMIC_ACQUIRE)!=2)
+            __asm__ volatile("yield");
+    }
+}
+
+boolean_t
+ravyn_sign_shared_cache_ptr(uint64_t value, unsigned key, uint64_t modifier,
+    uint64_t *signed_value)
+{
+    if (!ravyn_arm64e_reference_enabled() || (key!=0 && key!=2))
+        return FALSE;
+    ravyn_shared_pauth_initialize();
+    boolean_t interrupts=ml_set_interrupts_enabled(FALSE);
+    uint64_t oldlo,oldhi,oldctl,ctl;
+    __asm__ volatile("mrs %0, SCTLR_EL1" : "=r"(oldctl));
+    ctl=oldctl | (1ULL<<31) | (1ULL<<27);
+    __asm__ volatile("msr SCTLR_EL1, %0\n\tisb" :: "r"(ctl) : "memory");
+    if (key==0) {
+        __asm__ volatile("mrs %0, S3_0_C2_C1_0\n\tmrs %1, S3_0_C2_C1_1" : "=r"(oldlo),"=r"(oldhi));
+        __asm__ volatile("msr S3_0_C2_C1_0, %0\n\tmsr S3_0_C2_C1_1, %1" :: "r"(ravyn_shared_pauth_keys[0]),"r"(ravyn_shared_pauth_keys[1]) : "memory");
+        __asm__ volatile(".arch_extension pauth\n\tpacia %0, %1" : "+r"(value) : "r"(modifier));
+        __asm__ volatile("msr S3_0_C2_C1_0, %0\n\tmsr S3_0_C2_C1_1, %1" :: "r"(oldlo),"r"(oldhi) : "memory");
+    } else {
+        __asm__ volatile("mrs %0, S3_0_C2_C2_0\n\tmrs %1, S3_0_C2_C2_1" : "=r"(oldlo),"=r"(oldhi));
+        __asm__ volatile("msr S3_0_C2_C2_0, %0\n\tmsr S3_0_C2_C2_1, %1" :: "r"(ravyn_shared_pauth_keys[2]),"r"(ravyn_shared_pauth_keys[3]) : "memory");
+        __asm__ volatile(".arch_extension pauth\n\tpacda %0, %1" : "+r"(value) : "r"(modifier));
+        __asm__ volatile("msr S3_0_C2_C2_0, %0\n\tmsr S3_0_C2_C2_1, %1" :: "r"(oldlo),"r"(oldhi) : "memory");
+    }
+    __asm__ volatile("msr SCTLR_EL1, %0\n\tisb" :: "r"(oldctl) : "memory");
+    ml_set_interrupts_enabled(interrupts);
+    *signed_value=value;
+    return TRUE;
+}
+
+extern boolean_t ravyn_task_uses_user_jop(task_t task);
+
+/* Authenticate the ABI's process-independent function-pointer arguments.
+ * Preserve authentication failure poison; never strip an unverified pointer. */
+uint64_t
+ravyn_auth_user_function_ptr(task_t task, uint64_t value)
+{
+    if (!value || !ravyn_task_uses_user_jop(task))
+        return value;
+    boolean_t interrupts = ml_set_interrupts_enabled(FALSE);
+    uint64_t oldlo, oldhi, oldctl;
+    __asm__ volatile("mrs %0, SCTLR_EL1" : "=r"(oldctl));
+    __asm__ volatile("mrs %0, S3_0_C2_C1_0\n\tmrs %1, S3_0_C2_C1_1"
+        : "=r"(oldlo), "=r"(oldhi));
+    __asm__ volatile("msr S3_0_C2_C1_0, %0\n\tmsr S3_0_C2_C1_1, %1"
+        :: "r"(task->ravyn_user_pauth_keys[0]),
+           "r"(task->ravyn_user_pauth_keys[1]) : "memory");
+    uint64_t control = oldctl | (1ULL << 31);
+    __asm__ volatile("msr SCTLR_EL1, %0\n\tisb" :: "r"(control) : "memory");
+    __asm__ volatile(".arch_extension pauth\n\tautiza %0" : "+r"(value));
+    __asm__ volatile("msr S3_0_C2_C1_0, %0\n\tmsr S3_0_C2_C1_1, %1"
+        :: "r"(oldlo), "r"(oldhi) : "memory");
+    __asm__ volatile("msr SCTLR_EL1, %0\n\tisb" :: "r"(oldctl) : "memory");
+    ml_set_interrupts_enabled(interrupts);
+    return value;
+}
+
+void
+ravyn_user_pauth_exec(task_t task)
+{
+    if (ravyn_arm64e_reference_enabled()) {
+        ravyn_shared_pauth_initialize();
+        read_random(task->ravyn_user_pauth_keys, sizeof(task->ravyn_user_pauth_keys));
+        memcpy(task->ravyn_user_pauth_keys,ravyn_shared_pauth_keys,2*sizeof(uint64_t));
+        memcpy(task->ravyn_user_pauth_keys+4,ravyn_shared_pauth_keys+2,2*sizeof(uint64_t));
+    }
+}
+
+#define RAVYN_PAUTH_CONTROL_BITS ((1ULL << 31) | (1ULL << 30) | (1ULL << 27) | (1ULL << 13))
+
+static uint64_t ravyn_kernel_pauth_keys[10];
+static boolean_t ravyn_kernel_pauth_ready;
+
+static void
+ravyn_pauth_install(const uint64_t *k, boolean_t enable_jop)
+{
+#define KEY(reg, index) __asm__ volatile("msr " reg ", %0" :: "r"(k[index]) : "memory")
+    KEY("S3_0_C2_C1_0",0); KEY("S3_0_C2_C1_1",1);
+    KEY("S3_0_C2_C1_2",2); KEY("S3_0_C2_C1_3",3);
+    KEY("S3_0_C2_C2_0",4); KEY("S3_0_C2_C2_1",5);
+    KEY("S3_0_C2_C2_2",6); KEY("S3_0_C2_C2_3",7);
+    KEY("S3_0_C2_C3_0",8); KEY("S3_0_C2_C3_1",9);
+#undef KEY
+    uint64_t control;
+    __asm__ volatile("mrs %0, SCTLR_EL1" : "=r"(control));
+    control |= RAVYN_PAUTH_CONTROL_BITS;
+    if (!enable_jop)
+        control &= ~((1ULL << 31) | (1ULL << 27) | (1ULL << 13));
+    __asm__ volatile("msr SCTLR_EL1, %0\n\tisb" :: "r"(control) : "memory");
+}
+
+/* Install boot-local keys before static MAC policies or user tasks can run. */
+void
+ravyn_kernel_pauth_init(void)
+{
+    int enabled = 0;
+    if (!PE_parse_boot_argn("rvn_kpac", &enabled, sizeof(enabled)) ||
+        enabled != 1 || !ravyn_arm64e_reference_enabled()) {
+        return;
+    }
+
+    read_random(ravyn_kernel_pauth_keys, sizeof(ravyn_kernel_pauth_keys));
+    boolean_t interrupts = ml_set_interrupts_enabled(FALSE);
+    ravyn_pauth_install(ravyn_kernel_pauth_keys, TRUE);
+    __atomic_store_n(&ravyn_kernel_pauth_ready, TRUE, __ATOMIC_RELEASE);
+    ml_set_interrupts_enabled(interrupts);
+}
+
+/* EL0 state has been saved. Nested EL1 exceptions retain the kernel keys. */
+void
+ravyn_kernel_pauth_enter(void)
+{
+    if (__atomic_load_n(&ravyn_kernel_pauth_ready, __ATOMIC_ACQUIRE)) {
+        ravyn_pauth_install(ravyn_kernel_pauth_keys, TRUE);
+    }
+}
+
+/* Called with interrupts masked just before restoring EL0 registers. */
+void
+ravyn_user_pauth_restore(thread_t thread)
+{
+    if (ravyn_arm64e_reference_enabled()) {
+        task_t task = thread->task;
+        ravyn_pauth_install(task->ravyn_user_pauth_keys, ravyn_task_uses_user_jop(task));
+    }
+}
+
+#if DEVELOPMENT || DEBUG
+int
+ravyn_kernel_pauth_status(void)
+{
+    if (!__atomic_load_n(&ravyn_kernel_pauth_ready, __ATOMIC_ACQUIRE)) {
+        return -1;
+    }
+
+    uint64_t current, mismatch = 0;
+#define CHECK_KEY(reg, index) do { \
+    __asm__ volatile("mrs %0, " reg : "=r"(current)); \
+    mismatch |= current ^ ravyn_kernel_pauth_keys[index]; \
+} while (0)
+    CHECK_KEY("S3_0_C2_C1_0", 0); CHECK_KEY("S3_0_C2_C1_1", 1);
+    CHECK_KEY("S3_0_C2_C1_2", 2); CHECK_KEY("S3_0_C2_C1_3", 3);
+    CHECK_KEY("S3_0_C2_C2_0", 4); CHECK_KEY("S3_0_C2_C2_1", 5);
+    CHECK_KEY("S3_0_C2_C2_2", 6); CHECK_KEY("S3_0_C2_C2_3", 7);
+    CHECK_KEY("S3_0_C2_C3_0", 8); CHECK_KEY("S3_0_C2_C3_1", 9);
+#undef CHECK_KEY
+
+    __asm__ volatile("mrs %0, SCTLR_EL1" : "=r"(current));
+    int correct = (mismatch == 0) && (current & RAVYN_PAUTH_CONTROL_BITS) == RAVYN_PAUTH_CONTROL_BITS;
+    const uint64_t *user = current_task()->ravyn_user_pauth_keys;
+    for (unsigned i = 0; i < sizeof(ravyn_kernel_pauth_keys) / sizeof(*user); i += 2) {
+        correct &= (ravyn_kernel_pauth_keys[i] != user[i]) ||
+            (ravyn_kernel_pauth_keys[i + 1] != user[i + 1]);
+    }
+
+    return correct;
+}
+
+#endif
+
+#endif

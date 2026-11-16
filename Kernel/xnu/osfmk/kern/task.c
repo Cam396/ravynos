@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 /*
@@ -166,6 +171,7 @@
 #include <libkern/section_keywords.h>
 
 #include <mach-o/loader.h>
+#include <kdp/kdp_dyld.h>
 
 #if CONFIG_ATM
 #include <atm/atm_internal.h>
@@ -175,6 +181,10 @@
 
 #if CONFIG_MACF
 #include <security/mac_mach_internal.h>
+#if CONFIG_MACF
+static lck_mtx_t mac_filter_registration_lock;
+#endif
+#include <kern/syscall_sw.h>
 #endif
 
 #include <IOKit/IOBSD.h>
@@ -204,6 +214,10 @@ expired_task_statistics_t               dead_task_statistics;
 lck_spin_t              dead_task_statistics_lock;
 
 ledger_template_t task_ledger_template = NULL;
+
+/* Serializes the task dyld notifier arrays across register and deregister RPCs. */
+static lck_grp_t g_dyldinfo_mtx_grp;
+lck_mtx_t g_dyldinfo_mtx;
 
 SECURITY_READ_ONLY_LATE(struct _task_ledger_indices) task_ledgers __attribute__((used)) =
 {.cpu_time = -1,
@@ -343,6 +357,7 @@ extern int      proc_pid(struct proc *p);
 extern int      proc_selfpid(void);
 extern struct proc *current_proc(void);
 extern char     *proc_name_address(struct proc *p);
+extern void      proc_name_kdp(task_t t, char *buf, int size);
 extern uint64_t get_dispatchqueue_offset_from_proc(void *);
 extern int kevent_proc_copy_uptrs(void *proc, uint64_t *buf, int bufsize);
 extern void workq_proc_suspended(struct proc *p);
@@ -550,6 +565,213 @@ task_set_dyld_info(
 	task->all_image_info_addr = addr;
 	task->all_image_info_size = size;
 	task_unlock(task);
+}
+
+/*
+ * Update the process-info magic field and release rights detached while
+ * pruning or removing entries. The caller holds g_dyldinfo_mtx and itk_lock;
+ * this routine releases both locks before it returns.
+ */
+void
+task_dyld_process_info_update_helper(
+	task_t                  task,
+	size_t                  active_count,
+	vm_map_address_t        magic_addr,
+	ipc_port_t             *release_ports,
+	size_t                  release_count)
+{
+	ipc_port_t *notifiers_ptr = NULL;
+
+	assert(release_count <= DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT);
+	if (active_count == 0) {
+		assert(task->itk_dyld_notify != NULL);
+		notifiers_ptr = task->itk_dyld_notify;
+		task->itk_dyld_notify = NULL;
+		itk_unlock(task);
+		kfree(notifiers_ptr, sizeof(ipc_port_t) * DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT);
+		(void)copyoutmap_atomic32(task->map, MACH_PORT_NULL, magic_addr);
+	} else {
+		itk_unlock(task);
+		(void)copyoutmap_atomic32(task->map,
+		    (uint32_t)DYLD_PROCESS_INFO_NOTIFY_MAGIC, magic_addr);
+	}
+	lck_mtx_unlock(&g_dyldinfo_mtx);
+
+	for (size_t i = 0; i < release_count; i++) {
+		ipc_port_release_send(release_ports[i]);
+	}
+}
+
+kern_return_t
+task_dyld_process_info_notify_register(
+	task_t                  task,
+	ipc_port_t              sright)
+{
+	struct task_dyld_info dyld_info;
+	mach_msg_type_number_t info_count = TASK_DYLD_INFO_COUNT;
+	ipc_port_t release_ports[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+	uint32_t release_count = 0, active_count = 0;
+	mach_vm_address_t ports_addr;
+	kern_return_t kr;
+	boolean_t right_exists = FALSE;
+	ipc_port_t *notifiers_ptr;
+	ipc_port_t *portp;
+	vm_size_t notifiers_size = sizeof(ipc_port_t) * DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT;
+
+	if (task == TASK_NULL || task == kernel_task) {
+		return KERN_INVALID_TASK;
+	}
+	if (!IP_VALID(sright)) {
+		return KERN_INVALID_RIGHT;
+	}
+#if CONFIG_MACF
+	if (mac_task_check_dyld_process_info_notify_register()) {
+		return KERN_DENIED;
+	}
+#endif
+	kr = task_info(task, TASK_DYLD_INFO, (task_info_t)&dyld_info, &info_count);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+	if (dyld_info.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_32) {
+		ports_addr = (mach_vm_address_t)(dyld_info.all_image_info_addr +
+		    offsetof(struct user32_dyld_all_image_infos, notifyMachPorts));
+	} else if (dyld_info.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_64) {
+		ports_addr = (mach_vm_address_t)(dyld_info.all_image_info_addr +
+		    offsetof(struct user64_dyld_all_image_infos, notifyMachPorts));
+	} else {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	/* Allocate optimistically so the pointer is only inspected under itk_lock. */
+	notifiers_ptr = kalloc(notifiers_size);
+	if (notifiers_ptr != NULL) {
+		bzero(notifiers_ptr, notifiers_size);
+	}
+
+	lck_mtx_lock(&g_dyldinfo_mtx);
+	itk_lock(task);
+	if (task->itk_dyld_notify == NULL) {
+		if (notifiers_ptr == NULL) {
+			itk_unlock(task);
+			lck_mtx_unlock(&g_dyldinfo_mtx);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		task->itk_dyld_notify = notifiers_ptr;
+		notifiers_ptr = NULL;
+	}
+	assert(task->itk_dyld_notify != NULL);
+
+	for (int slot = 0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; slot++) {
+		portp = &task->itk_dyld_notify[slot];
+		if (*portp != IPC_PORT_NULL && !ip_active(*portp)) {
+			release_ports[release_count++] = *portp;
+			*portp = IPC_PORT_NULL;
+		} else if (*portp == sright) {
+			right_exists = TRUE;
+		}
+		if (*portp != IPC_PORT_NULL) {
+			active_count++;
+		}
+	}
+
+	if (right_exists) {
+		kr = KERN_RIGHT_EXISTS;
+	} else {
+		kr = KERN_NO_SPACE;
+		for (int slot = 0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; slot++) {
+			portp = &task->itk_dyld_notify[slot];
+			if (*portp == IPC_PORT_NULL) {
+				*portp = sright;
+				active_count++;
+				kr = KERN_SUCCESS;
+				break;
+			}
+		}
+	}
+
+	assert(active_count > 0);
+	task_dyld_process_info_update_helper(task, active_count,
+	    (vm_map_address_t)ports_addr, release_ports, release_count);
+	if (notifiers_ptr != NULL) {
+		kfree(notifiers_ptr, notifiers_size);
+	}
+	return kr;
+}
+
+kern_return_t
+task_dyld_process_info_notify_deregister(
+	task_t                  task,
+	mach_port_name_t        rcv_name)
+{
+	struct task_dyld_info dyld_info;
+	mach_msg_type_number_t info_count = TASK_DYLD_INFO_COUNT;
+	ipc_port_t release_ports[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+	uint32_t release_count = 0, active_count = 0;
+	boolean_t port_found = FALSE;
+	mach_vm_address_t ports_addr;
+	ipc_port_t sright;
+	kern_return_t kr;
+	ipc_port_t *portp;
+
+	if (task == TASK_NULL || task == kernel_task) {
+		return KERN_INVALID_TASK;
+	}
+	if (!MACH_PORT_VALID(rcv_name)) {
+		return KERN_INVALID_NAME;
+	}
+#if CONFIG_MACF
+	if (mac_task_check_dyld_process_info_notify_register()) {
+		return KERN_DENIED;
+	}
+#endif
+	kr = task_info(task, TASK_DYLD_INFO, (task_info_t)&dyld_info, &info_count);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+	if (dyld_info.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_32) {
+		ports_addr = (mach_vm_address_t)(dyld_info.all_image_info_addr +
+		    offsetof(struct user32_dyld_all_image_infos, notifyMachPorts));
+	} else if (dyld_info.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_64) {
+		ports_addr = (mach_vm_address_t)(dyld_info.all_image_info_addr +
+		    offsetof(struct user64_dyld_all_image_infos, notifyMachPorts));
+	} else {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	kr = ipc_port_translate_receive(current_space(), rcv_name, &sright);
+	if (kr != KERN_SUCCESS) {
+		return KERN_INVALID_RIGHT;
+	}
+	ip_reference(sright);
+	ip_unlock(sright);
+
+	lck_mtx_lock(&g_dyldinfo_mtx);
+	itk_lock(task);
+	if (task->itk_dyld_notify == NULL) {
+		itk_unlock(task);
+		lck_mtx_unlock(&g_dyldinfo_mtx);
+		ip_release(sright);
+		return KERN_FAILURE;
+	}
+	for (int slot = 0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; slot++) {
+		portp = &task->itk_dyld_notify[slot];
+		if (*portp == sright) {
+			release_ports[release_count++] = *portp;
+			*portp = IPC_PORT_NULL;
+			port_found = TRUE;
+		} else if (*portp != IPC_PORT_NULL && !ip_active(*portp)) {
+			release_ports[release_count++] = *portp;
+			*portp = IPC_PORT_NULL;
+		}
+		if (*portp != IPC_PORT_NULL) {
+			active_count++;
+		}
+	}
+	task_dyld_process_info_update_helper(task, active_count,
+	    (vm_map_address_t)ports_addr, release_ports, release_count);
+	ip_release(sright);
+	return port_found ? KERN_SUCCESS : KERN_FAILURE;
 }
 
 void
@@ -781,7 +1003,12 @@ task_init(void)
 	lck_grp_attr_setdefault(&task_lck_grp_attr);
 	lck_grp_init(&task_lck_grp, "task", &task_lck_grp_attr);
 	lck_attr_setdefault(&task_lck_attr);
+	lck_grp_init(&g_dyldinfo_mtx_grp, "g_dyldinfo", &task_lck_grp_attr);
+	lck_mtx_init(&g_dyldinfo_mtx, &g_dyldinfo_mtx_grp, &task_lck_attr);
 	lck_mtx_init(&tasks_threads_lock, &task_lck_grp, &task_lck_attr);
+#if CONFIG_MACF
+	lck_mtx_init(&mac_filter_registration_lock, &task_lck_grp, &task_lck_attr);
+#endif
 	lck_mtx_init(&tasks_corpse_lock, &task_lck_grp, &task_lck_attr);
 
 	task_zone = zinit(
@@ -1400,6 +1627,11 @@ task_create_internal(
 
 #if CONFIG_MACF
 	new_task->crash_label = NULL;
+	new_task->ravyn_mach_trap_filter_mask = NULL;
+	new_task->ravyn_mach_kobj_filter_mask = NULL;
+	if (parent_task != TASK_NULL) {
+		task_copy_filter_masks(new_task, parent_task);
+	}
 #endif
 
 #if CONFIG_MEMORYSTATUS
@@ -1960,6 +2192,17 @@ task_inspect_deallocate(
 }
 
 /*
+ *	task_read_deallocate:
+ *
+ *	Drop a reference on a task read port.
+ */
+void
+task_read_deallocate(task_read_t task_read)
+{
+	return task_deallocate((task_t)task_read);
+}
+
+/*
  *	task_suspension_token_deallocate:
  *
  *	Drop a reference on a task suspension token.
@@ -2080,9 +2323,19 @@ task_deliver_crash_notification(
 	mach_exception_data_type_t code[EXCEPTION_CODE_MAX];
 	ipc_port_t task_port, old_notify;
 
+	char procname[32] = "<unknown>";
+	int pid;
+#if defined(__x86_64__)
+	vm_map_t ravyn_stack_map = VM_MAP_NULL;
+	uint64_t ravyn_stack_rip = 0, ravyn_stack_rbp = 0, ravyn_stack_rsp = 0;
+#endif
+
 	if (crash_info == NULL) {
 		return KERN_FAILURE;
 	}
+
+	pid = task_pid(task);
+	proc_name_kdp(task, procname, sizeof(procname));
 
 	task_lock(task);
 	if (task_is_a_corpse_fork(task)) {
@@ -2105,6 +2358,7 @@ task_deliver_crash_notification(
 			ipc_thread_reset(th_iter);
 		}
 
+#if defined(__x86_64__)
                 x86_saved_state64_t *ss = USER_REGS64(th_iter);
 
                 if (ss == NULL || task->mach_header_vm_address == 0)
@@ -2126,14 +2380,56 @@ task_deliver_crash_notification(
                 printf("  CS:%08x DS:%08x ES:%08x FS:%08x GS:%08x\n",
                         ss->isf.cs, ss->ds, ss->es, ss->fs, ss->gs);
 
-                printf("Stack:\n");
-                uint64_t* frame = (uint64_t *)(ss->rbp);
-                for (int i = 0; frame && i < 8; ++i) {
-                        printf("%016llx\n", *(frame + 1)); // ret addr
-                        frame = (uint64_t *)(*frame);
+                /* Preserve the faulting RunningBoard frame for a bounded, map-aware
+                 * stack walk after dropping task_lock. Never dereference user RBP. */
+                if (ravyn_stack_map == VM_MAP_NULL &&
+                    ss->cr2 == 0x11 && ss->rdi == (uint64_t)-43) {
+                        ravyn_stack_rip = ss->isf.rip;
+                        ravyn_stack_rbp = ss->rbp;
+                        ravyn_stack_rsp = ss->isf.rsp;
+                        ravyn_stack_map = task->map;
+                        if (ravyn_stack_map != VM_MAP_NULL) {
+                                vm_map_reference(ravyn_stack_map);
+                        }
                 }
+#endif
+
+                /* RBP belongs to the dying user task. Direct dereferences here
+                 * fault under SMAP, and a corpse need not use the current map.
+                 * Keep saved-register diagnostics without walking user memory
+                 * while holding the task lock. */
         }
         task_unlock(task);
+
+#if defined(__x86_64__)
+        if (ravyn_stack_map != VM_MAP_NULL) {
+                uint64_t frame = ravyn_stack_rbp;
+                printf("RAVYN-FAULT-STACK pid=%d name=%s index=0 pc=0x%llx rbp=0x%llx rsp=0x%llx\n",
+                    pid, procname, (unsigned long long)ravyn_stack_rip,
+                    (unsigned long long)ravyn_stack_rbp,
+                    (unsigned long long)ravyn_stack_rsp);
+                for (int index = 1; index <= 16; index++) {
+                        uint64_t pair[2];
+                        if (frame < ravyn_stack_rsp || frame >= 0x0000800000000000ULL || (frame & 7)) {
+                                break;
+                        }
+                        kern_return_t copy_status = copyinmap(ravyn_stack_map, frame, pair, sizeof(pair));
+                        if (copy_status != KERN_SUCCESS) {
+                                printf("RAVYN-FAULT-STACK pid=%d name=%s index=%d copy_error=0x%x\n",
+                                    pid, procname, index, copy_status);
+                                break;
+                        }
+                        printf("RAVYN-FAULT-STACK pid=%d name=%s index=%d pc=0x%llx next_rbp=0x%llx\n",
+                            pid, procname, index, (unsigned long long)pair[1],
+                            (unsigned long long)pair[0]);
+                        if (pair[0] <= frame || pair[0] - frame > 0x100000) {
+                                break;
+                        }
+                        frame = pair[0];
+                }
+                vm_map_deallocate(ravyn_stack_map);
+        }
+#endif
 
 	/* Arm the no-sender notification for taskport */
 	task_reference(task);
@@ -2147,7 +2443,9 @@ task_deliver_crash_notification(
 	wsave = thread_interrupt_level(THREAD_UNINT);
 	kr = exception_triage_thread(EXC_CORPSE_NOTIFY, code, EXCEPTION_CODE_MAX, thread);
 	if (kr != KERN_SUCCESS) {
-		printf("Failed to send exception EXC_CORPSE_NOTIFY. error code: %d for pid %d\n", kr, task_pid(task));
+		printf("Failed to send exception EXC_CORPSE_NOTIFY. error=%d pid=%d name=%s etype=%d subcode=0x%llx corpse_code=0x%llx/0x%llx\n",
+		    kr, pid, procname, etype, (unsigned long long)subcode,
+		    (unsigned long long)code[0], (unsigned long long)code[1]);
 	}
 
 	(void)thread_interrupt_level(wsave);
@@ -3108,120 +3406,143 @@ task_release(
 	return KERN_SUCCESS;
 }
 
-kern_return_t
-task_threads(
-	task_t                                  task,
-	thread_act_array_t              *threads_out,
-	mach_msg_type_number_t  *count)
+static kern_return_t
+task_threads_internal(
+	task_t				task,
+	thread_act_array_t		*threads_out,
+	mach_msg_type_number_t	*count,
+	int				flavor)
 {
-	mach_msg_type_number_t  actual;
-	thread_t                                *thread_list;
-	thread_t                                thread;
-	vm_size_t                               size, size_needed;
-	void                                    *addr;
-	unsigned int                    i, j;
+	mach_msg_type_number_t actual;
+	thread_t *thread_list;
+	thread_t thread;
+	vm_size_t size, size_needed;
+	void *addr;
+	unsigned int i, j;
 
 	if (task == TASK_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	size = 0; addr = NULL;
-
+	size = 0;
+	addr = NULL;
 	for (;;) {
 		task_lock(task);
 		if (!task->active) {
 			task_unlock(task);
-
 			if (size != 0) {
 				kfree(addr, size);
 			}
-
 			return KERN_FAILURE;
 		}
-
 		actual = task->thread_count;
-
-		/* do we have the memory we need? */
 		size_needed = actual * sizeof(mach_port_t);
 		if (size_needed <= size) {
 			break;
 		}
-
-		/* unlock the task and allocate more memory */
 		task_unlock(task);
-
 		if (size != 0) {
 			kfree(addr, size);
 		}
-
 		assert(size_needed > 0);
 		size = size_needed;
-
 		addr = kalloc(size);
 		if (addr == 0) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
 	}
 
-	/* OK, have memory and the task is locked & active */
 	thread_list = (thread_t *)addr;
-
 	i = j = 0;
-
 	for (thread = (thread_t)queue_first(&task->threads); i < actual;
 	    ++i, thread = (thread_t)queue_next(&thread->task_threads)) {
 		thread_reference_internal(thread);
 		thread_list[j++] = thread;
 	}
-
 	assert(queue_end(&task->threads, (queue_entry_t)thread));
-
 	actual = j;
 	size_needed = actual * sizeof(mach_port_t);
-
-	/* can unlock task now that we've got the thread refs */
 	task_unlock(task);
 
 	if (actual == 0) {
-		/* no threads, so return null pointer and deallocate memory */
-
 		*threads_out = NULL;
 		*count = 0;
-
 		if (size != 0) {
 			kfree(addr, size);
 		}
-	} else {
-		/* if we allocated too much, must copy */
-
-		if (size_needed < size) {
-			void *newaddr;
-
-			newaddr = kalloc(size_needed);
-			if (newaddr == 0) {
-				for (i = 0; i < actual; ++i) {
-					thread_deallocate(thread_list[i]);
-				}
-				kfree(addr, size);
-				return KERN_RESOURCE_SHORTAGE;
-			}
-
-			bcopy(addr, newaddr, size_needed);
-			kfree(addr, size);
-			thread_list = (thread_t *)newaddr;
-		}
-
-		*threads_out = thread_list;
-		*count = actual;
-
-		/* do the conversion that Mig should handle */
-
-		for (i = 0; i < actual; ++i) {
-			((ipc_port_t *) thread_list)[i] = convert_thread_to_port(thread_list[i]);
-		}
+		return KERN_SUCCESS;
 	}
 
+	if (size_needed < size) {
+		void *newaddr = kalloc(size_needed);
+		if (newaddr == 0) {
+			for (i = 0; i < actual; ++i) {
+				thread_deallocate(thread_list[i]);
+			}
+			kfree(addr, size);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		bcopy(addr, newaddr, size_needed);
+		kfree(addr, size);
+		thread_list = (thread_t *)newaddr;
+	}
+
+	*threads_out = thread_list;
+	*count = actual;
+	for (i = 0; i < actual; ++i) {
+		if (flavor == THREAD_FLAVOR_READ) {
+			((ipc_port_t *)thread_list)[i] = convert_thread_read_to_port(thread_list[i]);
+		} else {
+			((ipc_port_t *)thread_list)[i] = convert_thread_to_port(thread_list[i]);
+		}
+	}
 	return KERN_SUCCESS;
+}
+
+kern_return_t
+task_threads(
+	task_t task,
+	thread_act_array_t *threads_out,
+	mach_msg_type_number_t *count)
+{
+	return task_threads_internal(task, threads_out, count, THREAD_FLAVOR_CONTROL);
+}
+
+kern_return_t
+task_threads_from_user(
+	mach_port_t port,
+	thread_act_array_t *threads_out,
+	mach_msg_type_number_t *count)
+{
+	ipc_kobject_type_t kotype = IKOT_NONE;
+	task_t task = TASK_NULL;
+	int flavor;
+	kern_return_t kr;
+
+	if (!IP_VALID(port)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	ip_lock(port);
+	if (ip_active(port)) {
+		kotype = ip_kotype(port);
+	}
+	ip_unlock(port);
+
+	if (kotype == IKOT_TASK) {
+		task = convert_port_to_task(port);
+		flavor = THREAD_FLAVOR_CONTROL;
+	} else if (kotype == IKOT_TASK_READ) {
+		task = convert_port_to_task_read(port);
+		flavor = THREAD_FLAVOR_READ;
+	} else {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (task == TASK_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	kr = task_threads_internal(task, threads_out, count, flavor);
+	task_deallocate(task);
+	return kr;
 }
 
 #define TASK_HOLD_NORMAL        0
@@ -5389,7 +5710,7 @@ task_info_from_user(
 	kern_return_t ret;
 
 	if (flavor == TASK_DYLD_INFO) {
-		task = convert_port_to_task(task_port);
+		task = convert_port_to_task_read(task_port);
 	} else {
 		task = convert_port_to_task_name(task_port);
 	}
@@ -7279,6 +7600,9 @@ void
 task_copy_fields_for_exec(task_t dst_task, task_t src_task)
 {
 	dst_task->vtimers = src_task->vtimers;
+#if CONFIG_MACF
+	task_copy_filter_masks(dst_task, src_task);
+#endif
 }
 
 #if DEVELOPMENT || DEBUG
@@ -7555,3 +7879,116 @@ task_is_pac_exception_fatal(
 	return (bool)(flags & TF_PAC_EXC_FATAL);
 }
 #endif /* __has_feature(ptrauth_calls) */
+
+#if CONFIG_MACF
+struct ravyn_filter_callbacks {
+    mac_task_mach_filter_cbfunc_t mach;
+    mac_task_kobj_filter_cbfunc_t kobj;
+};
+/* At most two publications: one callback then the other, or both at once.
+ * Published slots are immutable, so lock-free readers cannot see a torn pair. */
+static struct ravyn_filter_callbacks mac_filter_configs[3];
+static const struct ravyn_filter_callbacks *mac_filter_active;
+static unsigned int mac_filter_generation;
+
+uint8_t *
+task_get_mach_trap_filter_mask(task_t task)
+{
+    return os_atomic_load(&task->ravyn_mach_trap_filter_mask, acquire);
+}
+
+uint8_t *
+task_get_mach_kobj_filter_mask(task_t task)
+{
+    return os_atomic_load(&task->ravyn_mach_kobj_filter_mask, acquire);
+}
+
+void
+mac_task_set_mach_filter_mask(task_t task, uint8_t *mask)
+{
+    os_atomic_store(&task->ravyn_mach_trap_filter_mask, mask, release);
+}
+
+void
+mac_task_set_kobj_filter_mask(task_t task, uint8_t *mask)
+{
+    os_atomic_store(&task->ravyn_mach_kobj_filter_mask, mask, release);
+}
+
+void
+task_set_filter_msg_flag(task_t task, boolean_t flag)
+{
+    if (task == TASK_NULL) {
+        return;
+    }
+    task_lock(task);
+    if (flag) {
+        task->t_flags |= TF_FILTER_MSG;
+    } else {
+        task->t_flags &= ~TF_FILTER_MSG;
+    }
+    task_unlock(task);
+}
+
+boolean_t
+task_get_filter_msg_flag(task_t task)
+{
+    return task != TASK_NULL &&
+        (os_atomic_load(&task->t_flags, relaxed) & TF_FILTER_MSG) != 0;
+}
+
+void
+task_copy_filter_masks(task_t new_task, task_t old_task)
+{
+    mac_task_set_mach_filter_mask(new_task, task_get_mach_trap_filter_mask(old_task));
+    mac_task_set_kobj_filter_mask(new_task, task_get_mach_kobj_filter_mask(old_task));
+    if (task_get_filter_msg_flag(old_task)) {
+        new_task->t_flags |= TF_FILTER_MSG;
+    }
+}
+
+int
+mac_task_register_filter_callbacks(mac_task_mach_filter_cbfunc_t mach,
+    mac_task_kobj_filter_cbfunc_t kobj)
+{
+    int error = KERN_SUCCESS;
+    if (mach == NULL && kobj == NULL) return KERN_SUCCESS;
+    lck_mtx_lock(&mac_filter_registration_lock);
+    const struct ravyn_filter_callbacks *old = mac_filter_active;
+    if ((mach && old && old->mach) || (kobj && old && old->kobj)) {
+        error = KERN_FAILURE;
+        goto out;
+    }
+    assert(mac_filter_generation < 2);
+    struct ravyn_filter_callbacks *next = &mac_filter_configs[++mac_filter_generation];
+    next->mach = mach ? mach : old ? old->mach : NULL;
+    next->kobj = kobj ? kobj : old ? old->kobj : NULL;
+    os_atomic_store(&mac_filter_active, next, release);
+out:
+    lck_mtx_unlock(&mac_filter_registration_lock);
+    return error;
+}
+
+int
+mac_task_check_mach_filter(task_t task, struct proc *p, int number)
+{
+    if (number < 0 || number >= mach_trap_count) return KERN_INVALID_ARGUMENT;
+    uint8_t *mask = task_get_mach_trap_filter_mask(task);
+    if (mask == NULL || (mask[number >> 3] & (1U << (number & 7)))) return KERN_SUCCESS;
+    const struct ravyn_filter_callbacks *cbs = os_atomic_load(&mac_filter_active, acquire);
+    /* A configured evaluate bit must never become a bypass before registration. */
+    return cbs && cbs->mach ? cbs->mach(p, number) : KERN_NO_ACCESS;
+}
+
+int
+mac_task_check_kobj_filter(task_t task, struct proc *p, int message_id, int index)
+{
+    uint8_t *mask = task_get_mach_kobj_filter_mask(task);
+    if (mask == NULL) return KERN_SUCCESS;
+    /* Old native MIG routines absent from donor's mapping remain fail-closed. */
+    if (index < 0 || index >= mach_kobj_count) return KERN_NO_ACCESS;
+    if (mask[index >> 3] & (1U << (index & 7))) return KERN_SUCCESS;
+    const struct ravyn_filter_callbacks *cbs = os_atomic_load(&mac_filter_active, acquire);
+    return cbs && cbs->kobj ? cbs->kobj(p, message_id, index) : KERN_NO_ACCESS;
+}
+#endif /* CONFIG_MACF */

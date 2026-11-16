@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 #include <arm/proc_reg.h>
 #include <arm64/asm.h>
 #include <arm64/proc_reg.h>
@@ -832,6 +837,12 @@ common_start:
 #endif
 
 #if defined(BCM2837)
+    /* The shared bring-up configuration also supports the A76/GICv2 VM.
+     * Only the A53 BCM2837 has the local timer router at 0x40000040. */
+    mrs x2, MIDR_EL1
+    ubfx x2, x2, #4, #12
+    cmp x2, #0xd03
+    b.ne Lskip_bcm2837_timer_route
 	// Setup timer interrupt routing; must be done before MMU is enabled
 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
 	and		x15, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
@@ -842,6 +853,7 @@ common_start:
 	mov		w1, #0xF0 						// x1: 0xF0 	  Route to Core FIQs
 	str		w1, [x0]
 	isb		sy
+Lskip_bcm2837_timer_route:
 #endif
 
 

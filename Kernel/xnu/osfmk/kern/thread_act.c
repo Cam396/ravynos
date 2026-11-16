@@ -26,6 +26,11 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
+/*
  * @OSF_FREE_COPYRIGHT@
  */
 /*
@@ -1205,4 +1210,10 @@ void
 act_set_io_telemetry_ast(thread_t thread)
 {
 	act_set_ast(thread, AST_TELEMETRY_IO);
+}
+
+void
+act_set_macf_telemetry_ast(thread_t thread)
+{
+	act_set_ast(thread, AST_TELEMETRY_MACF);
 }

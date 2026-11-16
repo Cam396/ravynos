@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 #include <IOKit/IORegistryEntry.h>
 #include <libkern/c++/OSContainers.h>
@@ -2434,4 +2439,11 @@ OSDictionary *
 IORegistryEntry::getPropertyTable( void ) const
 {
 	return fPropertyTable;
+}
+
+bool
+IORegistryEntry::propertyExists(const char *key, const IORegistryPlane *plane,
+    unsigned int options) const
+{
+    return getProperty(key, plane, options) != NULL;
 }

@@ -25,6 +25,11 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * NOTICE: This file was modified for the ravynOS macOS bring-up project
+ * (2026-10-18 to 2026-11-15). Included in support of clause 2.2(b) of the
+ * Apple Public Source License, Version 2.0.
+ */
 
 
 #include <sys/cdefs.h>
@@ -54,6 +59,8 @@
 #include <os/overflow.h>
 
 #include <sys/uio.h>
+#include <sys/kdebug_kernel.h>
+#include <IOKit/IOTimeStamp.h>
 
 __BEGIN_DECLS
 #include <vm/pmap.h>
@@ -2109,7 +2116,10 @@ IOMemoryDescriptorReserved *
 IOMemoryDescriptor::getKernelReserved( void )
 {
 	if (!reserved) {
-		reserved = IONewZero(IOMemoryDescriptorReserved, 1);
+		IOMemoryDescriptorReserved *created = IONewZero(IOMemoryDescriptorReserved, 1);
+		if (created && !OSCompareAndSwapPtr(NULL, created, &reserved)) {
+			IODelete(created, IOMemoryDescriptorReserved, 1);
+		}
 	}
 	return reserved;
 }
@@ -5168,4 +5178,240 @@ IOPhysicalAddress
 IOMemoryDescriptor::getPhysicalAddress()
 {
 	return getPhysicalSegment( 0, NULL );
+}
+
+static const uint64_t kIODescriptorIDInvalid = 0;
+static volatile SInt64 gIOMDDescriptorID __attribute__((aligned(8))) = 0;
+void
+IOMemoryDescriptor::setDescriptorID( void )
+{
+	if (getKernelReserved() && (kIODescriptorIDInvalid == reserved->descriptorID)) {
+		SInt64 newID = OSIncrementAtomic64(&gIOMDDescriptorID);
+		OSCompareAndSwap64(kIODescriptorIDInvalid, newID, &reserved->descriptorID);
+	}
+}
+
+uint64_t
+IOMemoryDescriptor::getDescriptorID( void )
+{
+	setDescriptorID();
+
+	if (reserved) {
+		return reserved->descriptorID;
+	} else {
+		return kIODescriptorIDInvalid;
+	}
+}
+
+IOReturn
+IOMemoryDescriptor::ktraceEmitPhysicalSegments( void )
+{
+	if (!kdebug_debugid_explicitly_enabled(IODBG_IOMDPA(IOMDPA_MAPPED))) {
+		return kIOReturnSuccess;
+	}
+
+	assert(getPreparationID() >= kIOPreparationIDAlwaysPrepared);
+	if (getPreparationID() < kIOPreparationIDAlwaysPrepared) {
+		return kIOReturnBadArgument;
+	}
+
+	uint64_t descriptorID = getDescriptorID();
+	assert(descriptorID != kIODescriptorIDInvalid);
+	if (getDescriptorID() == kIODescriptorIDInvalid) {
+		return kIOReturnBadArgument;
+	}
+
+	IOTimeStampConstant(IODBG_IOMDPA(IOMDPA_MAPPED), descriptorID, VM_KERNEL_ADDRHIDE(this), getLength());
+
+#if __LP64__
+	static const uint8_t num_segments_page = 8;
+#else
+	static const uint8_t num_segments_page = 4;
+#endif
+	static const uint8_t num_segments_long = 2;
+
+	IOPhysicalAddress segments_page[num_segments_page];
+	IOPhysicalRange   segments_long[num_segments_long];
+	memset(segments_page, UINT32_MAX, sizeof(segments_page));
+	memset(segments_long, 0, sizeof(segments_long));
+
+	uint8_t segment_page_idx = 0;
+	uint8_t segment_long_idx = 0;
+
+	IOPhysicalRange physical_segment;
+	for (IOByteCount offset = 0; offset < getLength(); offset += physical_segment.length) {
+		physical_segment.address = getPhysicalSegment(offset, &physical_segment.length);
+
+		if (physical_segment.length == 0) {
+			break;
+		}
+
+		/**
+		 * Most IOMemoryDescriptors are made up of many individual physically discontiguous pages.  To optimize for trace
+		 * buffer memory, pack segment events according to the following.
+		 *
+		 * Mappings must be emitted in ascending order starting from offset 0.  Mappings can be associated with the previous
+		 * IOMDPA_MAPPED event emitted on by the current thread_id.
+		 *
+		 * IOMDPA_SEGMENTS_PAGE        = up to 8 virtually contiguous page aligned mappings of PAGE_SIZE length
+		 * - (ppn_0 << 32 | ppn_1), ..., (ppn_6 << 32 | ppn_7)
+		 * - unmapped pages will have a ppn of MAX_INT_32
+		 * IOMDPA_SEGMENTS_LONG	= up to 2 virtually contiguous mappings of variable length
+		 * - address_0, length_0, address_0, length_1
+		 * - unmapped pages will have an address of 0
+		 *
+		 * During each iteration do the following depending on the length of the mapping:
+		 * 1. add the current segment to the appropriate queue of pending segments
+		 * 1. check if we are operating on the same type of segment (PAGE/LONG) as the previous pass
+		 * 1a. if FALSE emit and reset all events in the previous queue
+		 * 2. check if we have filled up the current queue of pending events
+		 * 2a. if TRUE emit and reset all events in the pending queue
+		 * 3. after completing all iterations emit events in the current queue
+		 */
+
+		bool emit_page = false;
+		bool emit_long = false;
+		if ((physical_segment.address & PAGE_MASK) == 0 && physical_segment.length == PAGE_SIZE) {
+			segments_page[segment_page_idx] = physical_segment.address;
+			segment_page_idx++;
+
+			emit_long = segment_long_idx != 0;
+			emit_page = segment_page_idx == num_segments_page;
+
+			if (__improbable(emit_long)) {
+				IOTimeStampConstant(IODBG_IOMDPA(IOMDPA_SEGMENTS_LONG),
+				    segments_long[0].address, segments_long[0].length,
+				    segments_long[1].address, segments_long[1].length);
+			}
+
+			if (__improbable(emit_page)) {
+#if __LP64__
+				IOTimeStampConstant(IODBG_IOMDPA(IOMDPA_SEGMENTS_PAGE),
+				    ((uintptr_t) atop_64(segments_page[0]) << 32) | (ppnum_t) atop_64(segments_page[1]),
+				    ((uintptr_t) atop_64(segments_page[2]) << 32) | (ppnum_t) atop_64(segments_page[3]),
+				    ((uintptr_t) atop_64(segments_page[4]) << 32) | (ppnum_t) atop_64(segments_page[5]),
+				    ((uintptr_t) atop_64(segments_page[6]) << 32) | (ppnum_t) atop_64(segments_page[7]));
+#else
+				IOTimeStampConstant(IODBG_IOMDPA(IOMDPA_SEGMENTS_PAGE),
+				    (ppnum_t) atop_32(segments_page[1]),
+				    (ppnum_t) atop_32(segments_page[2]),
+				    (ppnum_t) atop_32(segments_page[3]),
+				    (ppnum_t) atop_32(segments_page[4]));
+#endif
+			}
+		} else {
+			segments_long[segment_long_idx] = physical_segment;
+			segment_long_idx++;
+
+			emit_page = segment_page_idx != 0;
+			emit_long = segment_long_idx == num_segments_long;
+
+			if (__improbable(emit_page)) {
+#if __LP64__
+				IOTimeStampConstant(IODBG_IOMDPA(IOMDPA_SEGMENTS_PAGE),
+				    ((uintptr_t) atop_64(segments_page[0]) << 32) | (ppnum_t) atop_64(segments_page[1]),
+				    ((uintptr_t) atop_64(segments_page[2]) << 32) | (ppnum_t) atop_64(segments_page[3]),
+				    ((uintptr_t) atop_64(segments_page[4]) << 32) | (ppnum_t) atop_64(segments_page[5]),
+				    ((uintptr_t) atop_64(segments_page[6]) << 32) | (ppnum_t) atop_64(segments_page[7]));
+#else
+				IOTimeStampConstant(IODBG_IOMDPA(IOMDPA_SEGMENTS_PAGE),
+				    (ppnum_t) atop_32(segments_page[1]),
+				    (ppnum_t) atop_32(segments_page[2]),
+				    (ppnum_t) atop_32(segments_page[3]),
+				    (ppnum_t) atop_32(segments_page[4]));
+#endif
+			}
+
+			if (emit_long) {
+				IOTimeStampConstant(IODBG_IOMDPA(IOMDPA_SEGMENTS_LONG),
+				    segments_long[0].address, segments_long[0].length,
+				    segments_long[1].address, segments_long[1].length);
+			}
+		}
+
+		if (__improbable(emit_page)) {
+			memset(segments_page, UINT32_MAX, sizeof(segments_page));
+			segment_page_idx = 0;
+		}
+
+		if (__improbable(emit_long)) {
+			memset(segments_long, 0, sizeof(segments_long));
+			segment_long_idx = 0;
+		}
+	}
+
+	if (segment_page_idx != 0) {
+		assert(segment_long_idx == 0);
+#if __LP64__
+		IOTimeStampConstant(IODBG_IOMDPA(IOMDPA_SEGMENTS_PAGE),
+		    ((uintptr_t) atop_64(segments_page[0]) << 32) | (ppnum_t) atop_64(segments_page[1]),
+		    ((uintptr_t) atop_64(segments_page[2]) << 32) | (ppnum_t) atop_64(segments_page[3]),
+		    ((uintptr_t) atop_64(segments_page[4]) << 32) | (ppnum_t) atop_64(segments_page[5]),
+		    ((uintptr_t) atop_64(segments_page[6]) << 32) | (ppnum_t) atop_64(segments_page[7]));
+#else
+		IOTimeStampConstant(IODBG_IOMDPA(IOMDPA_SEGMENTS_PAGE),
+		    (ppnum_t) atop_32(segments_page[1]),
+		    (ppnum_t) atop_32(segments_page[2]),
+		    (ppnum_t) atop_32(segments_page[3]),
+		    (ppnum_t) atop_32(segments_page[4]));
+#endif
+	} else if (segment_long_idx != 0) {
+		assert(segment_page_idx == 0);
+		IOTimeStampConstant(IODBG_IOMDPA(IOMDPA_SEGMENTS_LONG),
+		    segments_long[0].address, segments_long[0].length,
+		    segments_long[1].address, segments_long[1].length);
+	}
+
+	return kIOReturnSuccess;
+}
+
+uint64_t
+IOGeneralMemoryDescriptor::memoryReferenceGetDMAMapLength(
+    IOMemoryReference *ref, uint64_t *offset)
+{
+    if (offset) *offset = 0;
+    uint64_t total = 0;
+    for (uint32_t idx = 0; idx < ref->count; ++idx) {
+        vm_object_offset_t dataOffset = 0;
+        kern_return_t kr = mach_memory_entry_phys_page_offset(
+            ref->entries[idx].entry, &dataOffset);
+        if (kr != KERN_SUCCESS) return 0;
+        if (!idx && offset) *offset = dataOffset;
+        uint64_t span = round_page_64(dataOffset + ref->entries[idx].size);
+        if (span < dataOffset || total > UINT64_MAX - span) return 0;
+        total += span;
+    }
+    return total;
+}
+
+uint64_t
+IOMemoryDescriptor::getDMAMapLength(uint64_t * offset)
+{
+	uint64_t length;
+
+	if (_memRef) {
+		length = IOGeneralMemoryDescriptor::memoryReferenceGetDMAMapLength(_memRef, offset);
+	} else {
+		IOByteCount       iterate, segLen;
+		IOPhysicalAddress sourceAddr, sourceAlign;
+
+		if (kIOMemoryThreadSafe & _flags) {
+			LOCK;
+		}
+		length = 0;
+		iterate = 0;
+		while ((sourceAddr = getPhysicalSegment(iterate, &segLen, _kIOMemorySourceSegment))) {
+			sourceAlign = (sourceAddr & page_mask);
+			if (offset && !iterate) {
+				*offset = sourceAlign;
+			}
+			length += round_page(sourceAddr + segLen) - trunc_page(sourceAddr);
+			iterate += segLen;
+		}
+		if (kIOMemoryThreadSafe & _flags) {
+			UNLOCK;
+		}
+	}
+
+	return length;
 }
